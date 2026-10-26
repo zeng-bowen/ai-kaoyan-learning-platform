@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import sqlite3
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,8 +33,19 @@ with db() as con:
     CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, target_id TEXT NOT NULL, topic_id TEXT NOT NULL, source_type TEXT NOT NULL, source_name TEXT NOT NULL, question_type TEXT NOT NULL, difficulty INTEGER NOT NULL, stem TEXT NOT NULL, answer TEXT NOT NULL, analysis TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'DRAFT', FOREIGN KEY(target_id) REFERENCES targets(id), FOREIGN KEY(topic_id) REFERENCES topics(id));
     CREATE TABLE IF NOT EXISTS attempts(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, question_id TEXT NOT NULL, answer_text TEXT NOT NULL, self_rating INTEGER NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(question_id) REFERENCES questions(id));
     """)
+    # Additive migration: keep existing targets and all user learning records.
+    target_columns = {row["name"] for row in con.execute("PRAGMA table_info(targets)")}
+    for column, definition in {
+        "college": "TEXT NOT NULL DEFAULT ''",
+        "exam_code": "TEXT NOT NULL DEFAULT ''",
+        "source_url": "TEXT NOT NULL DEFAULT ''",
+        "source_checked_at": "TEXT",
+        "updated_at": "TEXT",
+    }.items():
+        if column not in target_columns:
+            con.execute(f"ALTER TABLE targets ADD COLUMN {column} {definition}")
     if not con.execute("SELECT 1 FROM targets LIMIT 1").fetchone():
-        con.executemany("INSERT INTO targets VALUES (?,?,?,?,?,?)", [
+        con.executemany("INSERT INTO targets(id,school,major,exam_subject,target_year,verified) VALUES (?,?,?,?,?,?)", [
             ("demo-pku", "北京大学", "经济学相关专业（演示）", "专业课配置待核验", 2028, 0),
             ("demo-ruc", "中国人民大学", "经济学相关专业（演示）", "专业课配置待核验", 2028, 0),
             ("demo-sufe", "上海财经大学", "经济学相关专业（演示）", "专业课配置待核验", 2028, 0),
@@ -65,7 +77,73 @@ def health():
 
 @app.get("/api/targets")
 def targets():
-    return rows("SELECT * FROM targets ORDER BY school")
+    return rows("SELECT * FROM targets ORDER BY school,target_year DESC")
+
+
+class TargetIn(BaseModel):
+    id: str = Field(min_length=3, max_length=100, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    school: str = Field(min_length=2, max_length=100)
+    college: str = Field(default="", max_length=100)
+    major: str = Field(min_length=2, max_length=120)
+    exam_subject: str = Field(min_length=2, max_length=120)
+    exam_code: str = Field(default="", max_length=30)
+    target_year: int = Field(ge=2020, le=2100)
+    source_url: str = Field(default="", max_length=1000)
+
+
+def validated_target(payload: TargetIn) -> dict:
+    data = payload.model_dump()
+    for key in ("id", "school", "college", "major", "exam_subject", "exam_code", "source_url"):
+        data[key] = data[key].strip()
+    if any(not data[key] for key in ("id", "school", "major", "exam_subject")):
+        raise HTTPException(422, "院校、专业和考试科目不能为空")
+    if data["source_url"]:
+        parsed = urlparse(data["source_url"])
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise HTTPException(422, "来源链接必须是有效的 HTTPS 地址")
+    return data
+
+
+@app.post("/api/admin/targets")
+def create_target(payload: TargetIn):
+    data = validated_target(payload)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with db() as con:
+            con.execute("""INSERT INTO targets(id,school,major,exam_subject,target_year,verified,college,exam_code,source_url,updated_at)
+                VALUES (:id,:school,:major,:exam_subject,:target_year,0,:college,:exam_code,:source_url,:updated_at)""", {**data, "updated_at": now})
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "目标考试 ID 已存在")
+    return {"id": data["id"], "verified": 0}
+
+
+@app.put("/api/admin/targets/{target_id}")
+def update_target(target_id: str, payload: TargetIn):
+    data = validated_target(payload)
+    if target_id != data["id"]:
+        raise HTTPException(422, "目标考试 ID 不可修改")
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as con:
+        cur = con.execute("""UPDATE targets SET school=:school,college=:college,major=:major,
+            exam_subject=:exam_subject,exam_code=:exam_code,target_year=:target_year,
+            source_url=:source_url,updated_at=:updated_at,verified=0,source_checked_at=NULL
+            WHERE id=:id""", {**data, "updated_at": now})
+        if cur.rowcount == 0:
+            raise HTTPException(404, "目标考试不存在")
+    return {"id": target_id, "verified": 0}
+
+
+@app.post("/api/admin/targets/{target_id}/verify")
+def verify_target(target_id: str):
+    with db() as con:
+        target = con.execute("SELECT source_url FROM targets WHERE id=?", (target_id,)).fetchone()
+        if target is None:
+            raise HTTPException(404, "目标考试不存在")
+        if not target["source_url"]:
+            raise HTTPException(422, "请先录入来源链接，再人工核对考试配置")
+        now = datetime.now(timezone.utc).isoformat()
+        con.execute("UPDATE targets SET verified=1,source_checked_at=?,updated_at=? WHERE id=?", (now, now, target_id))
+    return {"id": target_id, "verified": 1, "source_checked_at": now}
 
 
 @app.get("/api/topics")

@@ -29,3 +29,10 @@
 .workspace>section{max-width:1110px}
 @media(max-width:1080px){.topbar{grid-template-columns:minmax(260px,1fr) auto minmax(120px,1fr)}.demo-badge{display:none}.shell{grid-template-columns:84px 210px minmax(0,1fr);gap:10px}.rail-item{width:74px;padding:7px 12px;font-size:14px}.workspace{padding:30px 25px 60px}}
 @media(max-width:760px){.app{padding:0}.topbar{height:auto;min-height:72px;display:grid;grid-template-columns:1fr auto;gap:8px;padding:12px 14px;border-radius:0;border-left:0;border-right:0}.header-leading{grid-column:1/3;grid-row:2}.platform-title{grid-column:1;grid-row:1;text-align:left;font-size:20px}.header-trailing{grid-column:2;grid-row:1}.target-control{order:unset;width:auto;flex:1;justify-content:flex-start}.target-control select{max-width:190px}.shell{display:block;padding:0;border:0;border-radius:0;background:#f6f7f4}.rail{display:flex;flex-direction:row;gap:5px;overflow-x:auto;padding:9px 12px;white-space:nowrap;background:#fff}.rail-item,.rail-item:last-of-type{width:auto;min-height:36px;height:auto;flex:none;word-break:normal;white-space:nowrap;font-size:12px;padding:7px 11px;margin:0}.catalog{display:flex;min-height:auto;gap:4px;padding:8px 12px;border:0;border-top:1px solid #d8e0d6;border-radius:0;overflow-x:auto}.catalog-item{padding:7px 11px}.workspace{border:0;border-radius:0;padding:27px 16px 60px}.page-heading{margin-bottom:24px}}
+
+/* The current admin subsection is a local-only slice; keep the question editor mounted but out of view. */
+.workspace.target-admin-view>section:not(.target-admin-content){display:none}
+.target-actions{display:flex;gap:18px;margin-top:9px}
+.target-actions button{background:none;border:0;padding:0;color:#2f765d;font-size:12px;font-weight:700}
+.target-actions button:hover{text-decoration:underline}
+.notice-box a,.review-row a{color:#2f765d;text-decoration:underline;text-underline-offset:3px}
