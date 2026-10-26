@@ -1,120 +1,43 @@
-# AI Kaoyan Learning Platform 📚
+# 经研｜经济学考研学习平台
 
-An AI-powered learning platform designed for China's postgraduate entrance examination.
+第一版本地开发切片。产品范围与长期规则以 [PRODUCT_CONTEXT.md](PRODUCT_CONTEXT.md) 为准。
 
-The project aims to turn traditional question-bank practice into a more structured and personalized learning experience through **AI-assisted solutions, grading, mistake review, and automatic test generation**.
+后续开发采用 [GitHub Flow 协作约定](CONTRIBUTING.md)：从 `main` 创建短期分支，通过 Pull Request 检查和合并。
 
-> 🚧 This project is currently under active development.
+## 已实现
 
----
+- React + TypeScript 用户端九模块三栏工作台和目标院校切换；
+- FastAPI + SQLite 本地数据服务；
+- 知识点与练习题浏览、作答、参考答案、自评、持久保存和统计回流；
+- 管理员端练习题草稿录入与审核发布；
+- 管理员端院校考试配置新增、修改与人工来源核验；旧数据库可保留学习记录并增量升级；
+- 真题、兄弟院校、AI 和论坛的状态页。
 
-## ✨ Overview
+当前三个目标院校配置、三个知识点及三道题均为**演示样本**。专业课配置尚未核验，演示题不是院校真题。新增目标考试默认待核验，填写 HTTPS 来源后仍需管理员人工对照，平台不会自动判断来源是否真实。编辑已核验配置会撤回核验标记。管理员端无登录和权限控制，只允许在本机开发环境使用。不得直接部署到公网。
 
-Preparing for China's postgraduate entrance examination often involves working across scattered PDFs, answer sheets, notes, and question banks.
+## 运行
 
-This project explores a more integrated workflow:
+需要 Python 3.12+、Node.js 20+、pnpm。
 
-**Practice → AI Feedback → Mistake Review → Targeted Practice → Test Generation**
+在项目根目录分别启动两个终端：
 
-The current version focuses primarily on **Mathematics**, with a separate English learning platform also being developed.
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r api\requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
 
----
+```powershell
+pnpm install
+pnpm run dev
+```
 
-## 🚀 Core Features
+打开 `http://127.0.0.1:5173/`。若本机开发热更新受环境权限限制，可执行 `pnpm run build` 后用 `pnpm exec vite preview --host 127.0.0.1 --port 5173` 预览构建结果。
 
-### 📝 Online Practice
+数据保存在 `data/platform.db`，再次启动不会清空。API 文档位于 `http://127.0.0.1:8000/docs`。
 
-Practice questions directly in the browser instead of switching repeatedly between PDFs, answer sheets, and notes.
+运行院校配置回归测试：`python -m unittest discover -s api -p 'test_*.py'`。
 
-The question bank is being organized from materials including:
+## 下一步
 
-- Past postgraduate entrance examination papers
-- Li Lin 880 exercises
-- Recent mock examination papers
-- Topic-based practice questions
-
----
-
-### 🤖 AI Solutions
-
-Users can request AI-assisted explanations for questions.
-
-The goal is not only to provide a final answer, but also to help explain:
-
-- Key concepts
-- Reasoning process
-- Calculation steps
-- Alternative approaches
-- Common mistakes
-
----
-
-### ✅ AI-Assisted Grading
-
-For suitable questions, the platform can compare a user's response with reference solutions and provide feedback.
-
-Future versions will further explore:
-
-- Step-based grading
-- Error identification
-- Personalized feedback
-- Knowledge-gap analysis
-
----
-
-### 📕 Mistake Review
-
-Incorrect or difficult questions can be collected into a personal mistake library.
-
-Users can later review questions by:
-
-- Subject
-- Topic
-- Difficulty
-- Error type
-- Practice history
-
----
-
-### 🧩 Automatic Test Generation
-
-The platform supports generating customized practice sets from the question bank.
-
-Planned generation modes include:
-
-#### Exam Simulation
-Generate papers based on the structure and score distribution of real postgraduate entrance examinations.
-
-#### Topic Practice
-Generate focused exercises for specific areas such as:
-
-- Calculus
-- Linear Algebra
-- Probability and Statistics
-- Differentiation
-- Integration
-- Series
-
-#### Difficulty Control
-Questions can be combined according to different difficulty levels.
-
----
-
-## 🧠 Product Logic
-
-The long-term learning loop is designed around:
-
-```text
-Question Bank
-      ↓
-Practice
-      ↓
-AI Explanation / Grading
-      ↓
-Mistake Collection
-      ↓
-Knowledge Analysis
-      ↓
-Targeted Practice
-      ↓
-Automatic Test Generation
+优先补齐账号与管理员权限、院校考试配置及来源核验、知识树管理、真题试卷与单题关联，再把统计从自评扩展到可靠的作答证据。AI 接入排在结构化内容和学习记录之后。
