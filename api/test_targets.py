@@ -73,6 +73,9 @@ class TargetCatalogTests(unittest.TestCase):
     def test_local_admin_question_publication_cycle(self):
         client = TestClient(self.api.app)
         self.assertEqual(client.get('/api/admin/questions').status_code, 200)
+        remote = TestClient(self.api.app, client=('198.51.100.7', 50000))
+        self.assertEqual(remote.get('/api/admin/questions').status_code, 403)
+        self.assertEqual(client.get('/api/admin/questions', headers={'Host': 'untrusted.example'}).status_code, 400)
         initial = client.get('/api/versions').json()['content']
         payload = {
             'id': 'q-review-test', 'target_id': 'legacy', 'topic_id': 'legacy-topic',

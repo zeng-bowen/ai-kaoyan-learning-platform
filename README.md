@@ -38,6 +38,8 @@ pnpm run dev
 
 数据保存在 `data/platform.db`，截图保存在 `data/question-intakes/`，再次启动不会清空。API 文档位于 `http://127.0.0.1:8000/docs`。这些目录已被 Git 忽略。
 
+如果从旧项目目录继续使用已有学习记录，启动 API 前将环境变量 `ECON_DB_PATH` 指向原来的 `platform.db`；不要覆盖旧文件。截图目录会自动使用该数据库所在目录下的 `question-intakes/`。
+
 运行回归测试：`python -m unittest discover -s api -p 'test_*.py'`。
 
 当前“实时”采用本地单机数据库与约 2 秒版本检查；在线会话按最近 30 秒做题心跳统计。主观题自评不等于正确率，因此管理员端正确率显示为空值，直到客观判分能力实现。模型未配置时，识图接口返回明确的未配置状态，不产生自动题目。后续接入模型时，在 `api/recognition.py` 实现 `RecognitionProvider`，使用 `ECON_RECOGNITION_PROVIDER=模块:工厂函数` 指向本地适配器；输出只作为管理员待审核建议。
