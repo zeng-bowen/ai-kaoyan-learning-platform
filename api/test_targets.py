@@ -1,6 +1,7 @@
 """Regression checks for additive target migration and manual source review."""
 
 import importlib
+import base64
 import os
 from pathlib import Path
 import sqlite3
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 
 class TargetCatalogTests(unittest.TestCase):
@@ -67,6 +69,52 @@ class TargetCatalogTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as insecure:
             self.api.create_target(self.payload(id="bad-source", source_url="http://example.edu"))
         self.assertEqual(insecure.exception.status_code, 422)
+
+    def test_local_admin_question_publication_cycle(self):
+        client = TestClient(self.api.app)
+        self.assertEqual(client.get('/api/admin/questions').status_code, 200)
+        initial = client.get('/api/versions').json()['content']
+        payload = {
+            'id': 'q-review-test', 'target_id': 'legacy', 'topic_id': 'legacy-topic',
+            'source_type': 'CURATED_EXERCISE', 'source_name': '本地测试来源',
+            'question_type': '简答题', 'difficulty': 3, 'stem': '解释一个用于测试的经济学概念。',
+            'answer': '测试参考答案', 'analysis': '测试解析',
+        }
+        created = client.post('/api/admin/questions', json=payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertRegex(created.json()['catalog_number'], r'^Q-\d{6}$')
+        self.assertGreater(client.get('/api/versions').json()['content'], initial)
+        self.assertFalse(any(q['id'] == payload['id'] for q in client.get('/api/questions').json()))
+        self.assertTrue(any(q['id'] == payload['id'] for q in client.get('/api/admin/questions').json()))
+        reviewed = client.post('/api/admin/questions/q-review-test/review', json={'decision': 'APPROVED'})
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        self.assertTrue(any(q['id'] == payload['id'] for q in client.get('/api/questions').json()))
+        edit = client.put('/api/admin/questions/q-review-test', json={**payload, 'catalog_number': created.json()['catalog_number'], 'stem': '修改后需要重新审核的测试题干。'})
+        self.assertEqual(edit.status_code, 200, edit.text)
+        self.assertFalse(any(q['id'] == payload['id'] for q in client.get('/api/questions').json()))
+
+    def test_presence_and_admin_metric_are_separate_from_correctness(self):
+        client = TestClient(self.api.app)
+        self.assertEqual(client.post('/api/study-presence', json={'session_id': 'test-session-1234567890', 'active': True}).status_code, 200)
+        metrics = client.get('/api/admin/stats').json()
+        self.assertGreaterEqual(metrics['active_training_sessions'], 1)
+        self.assertIsNone(metrics['correct_rate'])
+
+    def test_topic_review_and_image_queue(self):
+        client = TestClient(self.api.app)
+        topic = {'id': 'topic-review-test', 'subject': '微观经济学', 'module': '需求理论', 'name': '测试知识点',
+                 'summary': '仅用于验证知识目录审核流程。', 'source_name': '本地测试来源', 'source_url': 'https://example.edu/topic'}
+        created = client.post('/api/admin/topics', json=topic)
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertFalse(any(item['id'] == topic['id'] for item in client.get('/api/topics').json()))
+        self.assertEqual(client.post('/api/admin/topics/topic-review-test/approve').status_code, 200)
+        self.assertTrue(any(item['id'] == topic['id'] for item in client.get('/api/topics').json()))
+        image = base64.b64encode(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aXcAAAAASUVORK5CYII=')).decode()
+        uploaded = client.post('/api/admin/intakes', json={'file_name': 'test.png', 'mime_type': 'image/png', 'base64_data': image})
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        intake_id = uploaded.json()['id']
+        self.assertEqual(client.get(f'/api/admin/intakes/{intake_id}/image').status_code, 200)
+        self.assertEqual(client.post(f'/api/admin/intakes/{intake_id}/recognize').status_code, 501)
 
 
 if __name__ == "__main__":
