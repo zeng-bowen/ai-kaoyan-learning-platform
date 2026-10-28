@@ -15,7 +15,9 @@ class TargetCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Windows scanners may briefly keep the SQLite file open after close.
-        cls.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1] / "data", ignore_cleanup_errors=True)
+        test_data_dir = Path(__file__).resolve().parents[1] / "data"
+        test_data_dir.mkdir(exist_ok=True)
+        cls.temp = tempfile.TemporaryDirectory(dir=test_data_dir, ignore_cleanup_errors=True)
         cls.path = Path(cls.temp.name) / "platform.db"
         with sqlite3.connect(cls.path) as con:
             con.executescript("""
