@@ -1,4 +1,4 @@
-"""Regression checks for additive target migration and manual source review."""
+"""Regression checks for additive exam-tag migration and manual content review."""
 
 import importlib
 import base64
@@ -8,7 +8,6 @@ import sqlite3
 import tempfile
 import unittest
 
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 
@@ -16,7 +15,7 @@ class TargetCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Windows scanners may briefly keep the SQLite file open after close.
-        cls.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        cls.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1] / "data", ignore_cleanup_errors=True)
         cls.path = Path(cls.temp.name) / "platform.db"
         with sqlite3.connect(cls.path) as con:
             con.executescript("""
@@ -42,33 +41,31 @@ class TargetCatalogTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def payload(self, **changes):
-        fields = dict(id="school-test-2028", school="测试大学", college="经济学院", major="经济学", exam_subject="经济学综合", exam_code="901", target_year=2028, source_url="https://example.edu/admission")
+        fields = dict(school="测试大学", exam_label="901 经济学综合", note="测试备注")
         return self.api.TargetIn(**(fields | changes))
 
     def test_legacy_records_survive_migration(self):
         legacy = next(item for item in self.api.targets() if item["id"] == "legacy")
-        self.assertEqual(legacy["college"], "")
+        self.assertEqual(legacy["exam_label"], "旧科目")
+        self.assertEqual(legacy["target_year"], self.api.current_exam_year())
+        self.assertEqual(self.api.topics("legacy")[0]["target_ids"], ["legacy"])
         self.assertEqual(len(self.api.attempts()), 1)
 
-    def test_create_verify_and_edit_resets_review(self):
-        self.api.create_target(self.payload())
-        verified = self.api.verify_target("school-test-2028")
-        self.assertEqual(verified["verified"], 1)
-        self.assertIsNotNone(verified["source_checked_at"])
-        self.api.update_target("school-test-2028", self.payload(exam_code="902"))
-        item = next(item for item in self.api.targets() if item["id"] == "school-test-2028")
-        self.assertEqual(item["exam_code"], "902")
-        self.assertEqual(item["verified"], 0)
-        self.assertIsNone(item["source_checked_at"])
-
-    def test_missing_or_insecure_source_cannot_be_verified(self):
-        self.api.create_target(self.payload(id="no-source", source_url=""))
-        with self.assertRaises(HTTPException) as missing:
-            self.api.verify_target("no-source")
-        self.assertEqual(missing.exception.status_code, 422)
-        with self.assertRaises(HTTPException) as insecure:
-            self.api.create_target(self.payload(id="bad-source", source_url="http://example.edu"))
-        self.assertEqual(insecure.exception.status_code, 422)
+    def test_three_field_tag_create_edit_and_auto_year(self):
+        client = TestClient(self.api.app)
+        created = client.post('/api/admin/targets', json=self.payload().model_dump())
+        self.assertEqual(created.status_code, 200, created.text)
+        target_id = created.json()['id']
+        self.assertEqual(created.json()['target_year'], self.api.current_exam_year())
+        item = next(item for item in client.get('/api/targets').json() if item['id'] == target_id)
+        self.assertEqual(item['exam_label'], '901 经济学综合')
+        self.assertEqual(item['note'], '测试备注')
+        self.assertEqual(client.post('/api/admin/targets', json=self.payload().model_dump()).status_code, 409)
+        edit = client.put(f'/api/admin/targets/{target_id}', json=self.payload(exam_label='902 经济学').model_dump())
+        self.assertEqual(edit.status_code, 200, edit.text)
+        self.assertEqual(next(item for item in client.get('/api/targets').json() if item['id'] == target_id)['exam_label'], '902 经济学')
+        self.assertEqual(client.post('/api/admin/targets', json={**self.payload().model_dump(), 'target_year': 2028}).status_code, 422)
+        self.assertEqual(client.post('/api/admin/targets', json={**self.payload().model_dump(), 'source_url': 'https://example.edu'}).status_code, 422)
 
     def test_local_admin_question_publication_cycle(self):
         client = TestClient(self.api.app)
@@ -103,15 +100,42 @@ class TargetCatalogTests(unittest.TestCase):
         self.assertGreaterEqual(metrics['active_training_sessions'], 1)
         self.assertIsNone(metrics['correct_rate'])
 
+    def test_topic_and_question_must_share_exam_tag(self):
+        client = TestClient(self.api.app)
+        created_tag = client.post('/api/admin/targets', json={'school': '标签测试大学', 'exam_label': '834 经济学', 'note': '测试用'})
+        self.assertEqual(created_tag.status_code, 200, created_tag.text)
+        tag_id = created_tag.json()['id']
+        topic = {'id': 'tagged-topic', 'subject': '微观经济学', 'module': '消费者理论', 'name': '考试标签测试知识点',
+                 'summary': '用于检查考试标签筛选和发布约束。', 'source_name': '本地测试来源',
+                 'source_url': 'https://example.edu/topic', 'target_ids': [tag_id]}
+        self.assertEqual(client.post('/api/admin/topics', json=topic).status_code, 200)
+        self.assertEqual(client.post('/api/admin/topics/tagged-topic/approve').status_code, 200)
+        self.assertTrue(any(item['id'] == topic['id'] for item in client.get(f'/api/topics?target_id={tag_id}').json()))
+        self.assertFalse(any(item['id'] == topic['id'] for item in client.get('/api/topics?target_id=legacy').json()))
+        question = {'id': 'q-tagged-test', 'target_id': 'legacy', 'topic_id': topic['id'], 'source_type': 'CURATED_EXERCISE',
+                    'source_name': '本地测试来源', 'question_type': '简答题', 'difficulty': 2,
+                    'stem': '解释用于验证标签约束的经济学概念。', 'answer': '测试答案', 'analysis': '测试解析'}
+        self.assertEqual(client.post('/api/admin/questions', json=question).status_code, 200)
+        self.assertEqual(client.post('/api/admin/questions/q-tagged-test/review', json={'decision': 'APPROVED'}).status_code, 422)
+        self.assertEqual(client.put('/api/admin/questions/q-tagged-test', json={**question, 'target_id': tag_id}).status_code, 200)
+        self.assertEqual(client.post('/api/admin/questions/q-tagged-test/review', json={'decision': 'APPROVED'}).status_code, 200)
+        self.assertTrue(any(item['id'] == question['id'] for item in client.get(f'/api/questions?target_id={tag_id}').json()))
+        self.assertFalse(any(item['id'] == question['id'] for item in client.get('/api/questions?target_id=legacy').json()))
+        self.assertEqual(client.put('/api/admin/topics/tagged-topic', json={**topic, 'target_ids': ['legacy']}).status_code, 200)
+        self.assertFalse(any(item['id'] == question['id'] for item in client.get(f'/api/questions?target_id={tag_id}').json()))
+        importlib.reload(self.api)
+        self.assertFalse(any(item['id'] == question['id'] for item in TestClient(self.api.app).get(f'/api/questions?target_id={tag_id}').json()))
+
     def test_topic_review_and_image_queue(self):
         client = TestClient(self.api.app)
         topic = {'id': 'topic-review-test', 'subject': '微观经济学', 'module': '需求理论', 'name': '测试知识点',
-                 'summary': '仅用于验证知识目录审核流程。', 'source_name': '本地测试来源', 'source_url': 'https://example.edu/topic'}
+                 'summary': '仅用于验证知识目录审核流程。', 'source_name': '本地测试来源', 'source_url': 'https://example.edu/topic', 'target_ids': ['legacy']}
         created = client.post('/api/admin/topics', json=topic)
         self.assertEqual(created.status_code, 200, created.text)
         self.assertFalse(any(item['id'] == topic['id'] for item in client.get('/api/topics').json()))
         self.assertEqual(client.post('/api/admin/topics/topic-review-test/approve').status_code, 200)
         self.assertTrue(any(item['id'] == topic['id'] for item in client.get('/api/topics').json()))
+        self.assertTrue(any(item['id'] == topic['id'] for item in client.get('/api/topics?target_id=legacy').json()))
         image = base64.b64encode(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aXcAAAAASUVORK5CYII=')).decode()
         uploaded = client.post('/api/admin/intakes', json={'file_name': 'test.png', 'mime_type': 'image/png', 'base64_data': image})
         self.assertEqual(uploaded.status_code, 200, uploaded.text)

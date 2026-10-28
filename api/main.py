@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from api.recognition import configured_provider
@@ -52,6 +52,8 @@ with db() as con:
     for column, definition in {
         "college": "TEXT NOT NULL DEFAULT ''",
         "exam_code": "TEXT NOT NULL DEFAULT ''",
+        "exam_label": "TEXT NOT NULL DEFAULT ''",
+        "note": "TEXT NOT NULL DEFAULT ''",
         "source_url": "TEXT NOT NULL DEFAULT ''",
         "source_checked_at": "TEXT",
         "updated_at": "TEXT",
@@ -76,6 +78,11 @@ with db() as con:
     }.items():
         if column not in topic_columns:
             con.execute(f"ALTER TABLE topics ADD COLUMN {column} {definition}")
+    tag_table_exists = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='topic_target_tags'").fetchone() is not None
+    con.execute("""CREATE TABLE IF NOT EXISTS topic_target_tags(
+        topic_id TEXT NOT NULL REFERENCES topics(id),
+        target_id TEXT NOT NULL REFERENCES targets(id),
+        PRIMARY KEY(topic_id,target_id))""")
     for scope in ("content", "activity"):
         con.execute("INSERT OR IGNORE INTO change_versions(scope,version) VALUES (?,0)", (scope,))
     for row in con.execute("SELECT rowid,id FROM questions WHERE catalog_number IS NULL OR catalog_number='' ORDER BY rowid"):
@@ -99,6 +106,14 @@ with db() as con:
         ])
         for row in con.execute("SELECT rowid,id FROM questions ORDER BY rowid"):
             con.execute("UPDATE questions SET catalog_number=? WHERE id=?", (f"Q-{row['rowid']:06d}", row["id"]))
+    # Preserve all legacy IDs, questions and attempts; expose a canonical tag label.
+    for row in con.execute("SELECT id,exam_code,exam_subject FROM targets WHERE exam_label='' OR exam_label IS NULL"):
+        code, subject = row["exam_code"].strip(), row["exam_subject"].strip()
+        label = f"{code} {subject}" if code and subject and subject != code else code or subject
+        con.execute("UPDATE targets SET exam_label=? WHERE id=?", (label, row["id"]))
+    if not tag_table_exists:
+        con.execute("""INSERT OR IGNORE INTO topic_target_tags(topic_id,target_id)
+            SELECT DISTINCT topic_id,target_id FROM questions""")
 
 app = FastAPI(title="经济学考研学习平台 API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
@@ -123,6 +138,11 @@ def bump(con: sqlite3.Connection, scope: str):
     con.execute("UPDATE change_versions SET version=version+1 WHERE scope=?", (scope,))
 
 
+def current_exam_year() -> int:
+    """The upcoming exam cohort follows the current China calendar year."""
+    return datetime.now(timezone(timedelta(hours=8))).year + 1
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "mode": "local-development"}
@@ -135,30 +155,20 @@ def versions():
 
 @app.get("/api/targets")
 def targets():
-    return rows("SELECT * FROM targets ORDER BY school,target_year DESC")
+    return rows("SELECT id,school,exam_label,note,? AS target_year FROM targets ORDER BY school,exam_label", (current_exam_year(),))
 
 
 class TargetIn(BaseModel):
-    id: str = Field(min_length=3, max_length=100, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    model_config = ConfigDict(extra="forbid")
     school: str = Field(min_length=2, max_length=100)
-    college: str = Field(default="", max_length=100)
-    major: str = Field(min_length=2, max_length=120)
-    exam_subject: str = Field(min_length=2, max_length=120)
-    exam_code: str = Field(default="", max_length=30)
-    target_year: int = Field(ge=2020, le=2100)
-    source_url: str = Field(default="", max_length=1000)
+    exam_label: str = Field(min_length=2, max_length=120)
+    note: str = Field(default="", max_length=1000)
 
 
 def validated_target(payload: TargetIn) -> dict:
-    data = payload.model_dump()
-    for key in ("id", "school", "college", "major", "exam_subject", "exam_code", "source_url"):
-        data[key] = data[key].strip()
-    if any(not data[key] for key in ("id", "school", "major", "exam_subject")):
-        raise HTTPException(422, "院校、专业和考试科目不能为空")
-    if data["source_url"]:
-        parsed = urlparse(data["source_url"])
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise HTTPException(422, "来源链接必须是有效的 HTTPS 地址")
+    data = {key: value.strip() for key, value in payload.model_dump().items()}
+    if not data["school"] or not data["exam_label"]:
+        raise HTTPException(422, "院校和考试科目代码不能为空")
     return data
 
 
@@ -166,55 +176,56 @@ def validated_target(payload: TargetIn) -> dict:
 def create_target(payload: TargetIn):
     data = validated_target(payload)
     now = datetime.now(timezone.utc).isoformat()
-    try:
-        with db() as con:
-            con.execute("""INSERT INTO targets(id,school,major,exam_subject,target_year,verified,college,exam_code,source_url,updated_at)
-                VALUES (:id,:school,:major,:exam_subject,:target_year,0,:college,:exam_code,:source_url,:updated_at)""", {**data, "updated_at": now})
-            bump(con, "content")
-    except sqlite3.IntegrityError:
-        raise HTTPException(409, "目标考试 ID 已存在")
-    return {"id": data["id"], "verified": 0}
+    target_id = f"exam-{uuid.uuid4().hex}"
+    with db() as con:
+        if con.execute("SELECT 1 FROM targets WHERE school=? AND exam_label=?", (data["school"], data["exam_label"])).fetchone():
+            raise HTTPException(409, "院校与考试科目代码标签已存在")
+        con.execute("""INSERT INTO targets(id,school,major,exam_subject,target_year,verified,exam_label,note,updated_at)
+            VALUES (?,?, '', ?, ?,0,?,?,?)""", (target_id, data["school"], data["exam_label"], current_exam_year(), data["exam_label"], data["note"], now))
+        bump(con, "content")
+    return {"id": target_id, "target_year": current_exam_year()}
 
 
 @app.put("/api/admin/targets/{target_id}")
 def update_target(target_id: str, payload: TargetIn):
     data = validated_target(payload)
-    if target_id != data["id"]:
-        raise HTTPException(422, "目标考试 ID 不可修改")
     now = datetime.now(timezone.utc).isoformat()
     with db() as con:
-        cur = con.execute("""UPDATE targets SET school=:school,college=:college,major=:major,
-            exam_subject=:exam_subject,exam_code=:exam_code,target_year=:target_year,
-            source_url=:source_url,updated_at=:updated_at,verified=0,source_checked_at=NULL
-            WHERE id=:id""", {**data, "updated_at": now})
+        if con.execute("SELECT 1 FROM targets WHERE school=? AND exam_label=? AND id<>?", (data["school"], data["exam_label"], target_id)).fetchone():
+            raise HTTPException(409, "院校与考试科目代码标签已存在")
+        cur = con.execute("""UPDATE targets SET school=?,exam_label=?,note=?,target_year=?,updated_at=?
+            WHERE id=?""", (data["school"], data["exam_label"], data["note"], current_exam_year(), now, target_id))
         if cur.rowcount == 0:
             raise HTTPException(404, "目标考试不存在")
         bump(con, "content")
-    return {"id": target_id, "verified": 0}
+    return {"id": target_id, "target_year": current_exam_year()}
 
 
-@app.post("/api/admin/targets/{target_id}/verify")
-def verify_target(target_id: str):
-    with db() as con:
-        target = con.execute("SELECT source_url FROM targets WHERE id=?", (target_id,)).fetchone()
-        if target is None:
-            raise HTTPException(404, "目标考试不存在")
-        if not target["source_url"]:
-            raise HTTPException(422, "请先录入来源链接，再人工核对考试配置")
-        now = datetime.now(timezone.utc).isoformat()
-        con.execute("UPDATE targets SET verified=1,source_checked_at=?,updated_at=? WHERE id=?", (now, now, target_id))
-        bump(con, "content")
-    return {"id": target_id, "verified": 1, "source_checked_at": now}
+def tagged_topics(approved_only: bool, target_id: str | None = None):
+    clauses = []
+    params: list[str] = []
+    if approved_only:
+        clauses.append("t.review_status='APPROVED'")
+    if target_id:
+        clauses.append("EXISTS (SELECT 1 FROM topic_target_tags x WHERE x.topic_id=t.id AND x.target_id=?)")
+        params.append(target_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    items = rows(f"SELECT t.* FROM topics t {where} ORDER BY t.subject,t.module,t.name", tuple(params))
+    tags = rows("SELECT topic_id,target_id FROM topic_target_tags")
+    by_topic: dict[str, list[str]] = {}
+    for tag in tags:
+        by_topic.setdefault(tag["topic_id"], []).append(tag["target_id"])
+    return [{**item, "target_ids": by_topic.get(item["id"], [])} for item in items]
 
 
 @app.get("/api/topics")
-def topics():
-    return rows("SELECT * FROM topics WHERE review_status='APPROVED' ORDER BY subject,module,name")
+def topics(target_id: str | None = None):
+    return tagged_topics(True, target_id)
 
 
 @app.get("/api/admin/topics")
 def admin_topics():
-    return rows("SELECT * FROM topics ORDER BY subject,module,name")
+    return tagged_topics(False)
 
 
 class TopicIn(BaseModel):
@@ -225,10 +236,20 @@ class TopicIn(BaseModel):
     summary: str = Field(min_length=5)
     source_name: str = Field(min_length=2, max_length=200)
     source_url: str = Field(default="", max_length=1000)
+    target_ids: list[str] = Field(min_length=1)
 
 
 def validated_topic(payload: TopicIn):
-    data = {key: value.strip() for key, value in payload.model_dump().items()}
+    data = payload.model_dump()
+    for key in ("id", "subject", "module", "name", "summary", "source_name", "source_url"):
+        data[key] = data[key].strip()
+    data["target_ids"] = list(dict.fromkeys(item.strip() for item in data["target_ids"] if item.strip()))
+    if not data["target_ids"]:
+        raise HTTPException(422, "知识点至少绑定一个院校考试标签")
+    with db() as con:
+        existing = con.execute(f"SELECT COUNT(*) FROM targets WHERE id IN ({','.join('?' for _ in data['target_ids'])})", data["target_ids"]).fetchone()[0]
+    if existing != len(data["target_ids"]):
+        raise HTTPException(422, "所选院校考试标签不存在")
     if data["source_url"]:
         parsed = urlparse(data["source_url"])
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -243,6 +264,7 @@ def create_topic(payload: TopicIn):
         with db() as con:
             con.execute("""INSERT INTO topics(id,subject,module,name,summary,source_name,source_url,review_status,updated_at)
                 VALUES (:id,:subject,:module,:name,:summary,:source_name,:source_url,'DRAFT',:updated_at)""", {**data, "updated_at": datetime.now(timezone.utc).isoformat()})
+            con.executemany("INSERT INTO topic_target_tags(topic_id,target_id) VALUES (?,?)", [(data["id"], target_id) for target_id in data["target_ids"]])
             bump(con, "content")
     except sqlite3.IntegrityError:
         raise HTTPException(409, "知识点 ID 已存在")
@@ -259,6 +281,8 @@ def update_topic(topic_id: str, payload: TopicIn):
             source_name=:source_name,source_url=:source_url,review_status='DRAFT',updated_at=:updated_at WHERE id=:id""", {**data, "updated_at": datetime.now(timezone.utc).isoformat()})
         if cur.rowcount == 0:
             raise HTTPException(404, "知识点不存在")
+        con.execute("DELETE FROM topic_target_tags WHERE topic_id=?", (topic_id,))
+        con.executemany("INSERT INTO topic_target_tags(topic_id,target_id) VALUES (?,?)", [(topic_id, target_id) for target_id in data["target_ids"]])
         con.execute("UPDATE questions SET review_status='DRAFT',reviewed_at=NULL,review_note='关联知识点已修改，需重新审核' WHERE topic_id=? AND review_status='APPROVED'", (topic_id,))
         bump(con, "content")
     return {"id": topic_id, "review_status": "DRAFT"}
@@ -272,6 +296,8 @@ def approve_topic(topic_id: str):
             raise HTTPException(404, "知识点不存在")
         if not topic["source_url"]:
             raise HTTPException(422, "知识点发布前须填写并人工核对来源链接")
+        if not con.execute("SELECT 1 FROM topic_target_tags WHERE topic_id=?", (topic_id,)).fetchone():
+            raise HTTPException(422, "知识点须绑定院校考试标签")
         con.execute("UPDATE topics SET review_status='APPROVED',updated_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), topic_id))
         bump(con, "content")
     return {"id": topic_id, "review_status": "APPROVED"}
@@ -283,7 +309,9 @@ def questions(target_id: str | None = None):
     params = (target_id,) if target_id else ()
     if target_id:
         clause += " AND q.target_id=?"
-    return rows(f"SELECT q.* FROM questions q JOIN topics t ON t.id=q.topic_id {clause} ORDER BY q.catalog_number", params)
+    return rows(f"""SELECT q.* FROM questions q JOIN topics t ON t.id=q.topic_id
+        JOIN topic_target_tags x ON x.topic_id=q.topic_id AND x.target_id=q.target_id
+        {clause} ORDER BY q.catalog_number""", params)
 
 
 @app.get("/api/admin/questions")
@@ -306,7 +334,9 @@ class AttemptIn(BaseModel):
 
 @app.post("/api/attempts")
 def create_attempt(payload: AttemptIn):
-    question = rows("SELECT q.id,q.review_status,t.review_status AS topic_status FROM questions q JOIN topics t ON t.id=q.topic_id WHERE q.id=?", (payload.question_id,))
+    question = rows("""SELECT q.id,q.review_status,t.review_status AS topic_status FROM questions q
+        JOIN topics t ON t.id=q.topic_id JOIN topic_target_tags x ON x.topic_id=q.topic_id AND x.target_id=q.target_id
+        WHERE q.id=?""", (payload.question_id,))
     if not question or question[0]["review_status"] != "APPROVED" or question[0]["topic_status"] != "APPROVED":
         raise HTTPException(404, "题目不可作答")
     with db() as con:
@@ -358,6 +388,7 @@ def admin_stats():
         active = con.execute("SELECT COUNT(*) FROM study_presence WHERE active=1 AND last_seen>=?", (cutoff,)).fetchone()[0]
         attempts = con.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
         published = con.execute("""SELECT COUNT(*) FROM questions q JOIN topics t ON t.id=q.topic_id
+            JOIN topic_target_tags x ON x.topic_id=q.topic_id AND x.target_id=q.target_id
             WHERE q.review_status='APPROVED' AND t.review_status='APPROVED'""").fetchone()[0]
         difficulty = [dict(row) for row in con.execute("""SELECT q.difficulty, COUNT(*) AS attempts, ROUND(AVG(a.self_rating),2) AS average_self_rating
             FROM attempts a JOIN questions q ON q.id=a.question_id GROUP BY q.difficulty ORDER BY q.difficulty""")]
@@ -474,6 +505,8 @@ def review_question(question_id: str, payload: ReviewIn):
             topic = con.execute("SELECT review_status FROM topics WHERE id=?", (question["topic_id"],)).fetchone()
             if not topic or topic["review_status"] != "APPROVED":
                 raise HTTPException(422, "关联知识点须先审核发布")
+            if not con.execute("SELECT 1 FROM topic_target_tags WHERE topic_id=? AND target_id=?", (question["topic_id"], question["target_id"])).fetchone():
+                raise HTTPException(422, "题目与知识点必须绑定相同的院校考试标签")
         now = datetime.now(timezone.utc).isoformat()
         con.execute("UPDATE questions SET review_status=?,review_note=?,reviewed_at=?,updated_at=? WHERE id=?", (payload.decision, payload.note.strip(), now, now, question_id))
         if question["intake_id"] and payload.decision == "APPROVED":
