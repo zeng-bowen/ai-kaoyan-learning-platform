@@ -200,26 +200,38 @@ class TargetCatalogTests(unittest.TestCase):
         self.assertNotIn('do-not-leak', batch.text)
         self.assertEqual(self.intake_record(intake_id)['status'], 'AWAITING_PROVIDER')
 
-    def test_recognition_failures_and_empty_candidates_preserve_intakes(self):
+    def test_recognition_failure_preserves_intake_and_empty_candidates_are_ai_draft(self):
         client = TestClient(self.api.app)
         failed_id = self.upload_intake(client, "provider-failure.png")
         empty_id = self.upload_intake(client, "empty-candidates.png")
+        before_admin_questions = client.get('/api/admin/questions').json()
+        before_public_questions = client.get('/api/questions').json()
+        with sqlite3.connect(self.path) as con:
+            before_verified = con.execute("SELECT id,source_verified FROM questions ORDER BY id").fetchall()
         provider = Mock()
         provider.recognize.side_effect = RuntimeError("Authorization: Bearer secret-token")
         with patch.object(self.api, "configured_provider", return_value=provider):
             failed = client.post(f'/api/admin/intakes/{failed_id}/recognize')
         self.assertEqual(failed.status_code, 502, failed.text)
         self.assertNotIn('secret-token', failed.text)
+        failed_record = self.intake_record(failed_id)
+        self.assertEqual(failed_record['status'], 'AWAITING_PROVIDER')
+        self.assertIsNone(failed_record['recognition_json'])
+
+        # Provider 正常执行但无可靠候选：属于正常识别结果，保存为 AI_DRAFT，不是 502。
         provider.recognize.side_effect = None
         provider.recognize.return_value = []
         with patch.object(self.api, "configured_provider", return_value=provider):
             empty = client.post(f'/api/admin/intakes/{empty_id}/recognize')
-        self.assertEqual(empty.status_code, 502, empty.text)
-        self.assertIn('未返回候选建议', empty.json()['detail'])
-        for intake_id in (failed_id, empty_id):
-            record = self.intake_record(intake_id)
-            self.assertEqual(record['status'], 'AWAITING_PROVIDER')
-            self.assertIsNone(record['recognition_json'])
+        self.assertEqual(empty.status_code, 200, empty.text)
+        self.assertEqual(empty.json(), {'id': empty_id, 'status': 'AI_DRAFT', 'suggestions': []})
+        empty_record = self.intake_record(empty_id)
+        self.assertEqual(empty_record['status'], 'AI_DRAFT')
+        self.assertEqual(json.loads(empty_record['recognition_json']), [])
+        self.assertEqual(client.get('/api/admin/questions').json(), before_admin_questions)
+        self.assertEqual(client.get('/api/questions').json(), before_public_questions)
+        with sqlite3.connect(self.path) as con:
+            self.assertEqual(con.execute("SELECT id,source_verified FROM questions ORDER BY id").fetchall(), before_verified)
 
     def test_recognition_success_is_only_a_reviewable_draft(self):
         client = TestClient(self.api.app)

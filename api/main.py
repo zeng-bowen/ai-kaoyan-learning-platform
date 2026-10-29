@@ -595,8 +595,7 @@ def recognize_intake_with_provider(intake_id: str, provider):
         recognition_json = json.dumps(suggestions, ensure_ascii=False)
     except Exception:
         raise HTTPException(502, "识别服务失败，请稍后重试或人工录题")
-    if not suggestions:
-        raise HTTPException(502, "识别服务未返回候选建议，请稍后重试或人工录题")
+    # 空候选是 Provider 正常执行的结果，仍保存为 AI_DRAFT，由管理员决定重新识别或人工录题。
     with db() as con:
         con.execute("UPDATE question_intakes SET status='AI_DRAFT',recognition_json=? WHERE id=?", (recognition_json, intake_id))
         bump(con, "content")
