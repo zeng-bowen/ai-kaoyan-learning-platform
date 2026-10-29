@@ -21,3 +21,28 @@
 .target-tag-picker{border:1px solid #d4dfd1;border-radius:7px;margin:6px 0 16px;padding:12px 14px}.target-tag-picker legend{color:#3d5c4c;font-size:12px;font-weight:700;padding:0 5px}.target-tag-picker label{display:flex;align-items:center;gap:8px;margin:8px 0;font-weight:500}.target-tag-picker input{width:auto;margin:0}.target-tag-picker p{margin:6px 0}
 @media(max-width:1100px){.admin-columns{grid-template-columns:1fr}.admin-metrics{grid-template-columns:repeat(2,1fr)}.admin-filters{grid-template-columns:repeat(2,minmax(150px,1fr))}}
 @media(max-width:760px){.admin-topbar{height:auto;min-height:62px;padding:12px 16px}.admin-topbar span:not(.demo-badge),.admin-topbar .demo-badge{display:none}.admin-shell{display:block}.admin-nav{display:flex;gap:5px;overflow-x:auto;padding:8px 12px;white-space:nowrap}.admin-nav h2,.admin-nav p{display:none}.admin-nav button{width:auto;flex:none;margin:0;padding:9px 12px;font-size:12px}.admin-main{padding:25px 15px 60px}.admin-heading h1{font-size:25px}.admin-metrics{gap:8px}.admin-metrics>div{padding:15px}.admin-metrics strong{font-size:26px}.admin-filters{grid-template-columns:1fr 1fr}.admin-panel{padding:18px}.form-grid{grid-template-columns:1fr}.admin-list>div{display:block}.admin-list .admin-actions{margin-top:10px}}
+/* AI 识图审核 —— Issue #6 */
+.admin-list>div.intake-item{display:block}
+.intake-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}
+.admin-actions button.recognize-trigger{background:#235446;color:#fff;border:1px solid #1c453a;border-radius:6px;padding:8px 11px;font-size:12px;font-weight:700}
+.admin-actions button.recognize-trigger:hover:not(:disabled){background:#1b463a}
+.admin-actions button.recognize-trigger:disabled{cursor:progress;opacity:.6}
+.recognize-panel{margin-top:12px;border:1px solid #d9e3d6;border-radius:8px;background:#f8faf7;padding:14px 16px}
+.recognize-line{margin:0 0 8px;font-size:12px;color:#3f5c4d;line-height:1.6}
+.recognize-line.warn{color:#8a6a2d}
+.recognize-line.danger{color:#9a523f}
+.recognize-panel-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;margin-bottom:10px}
+.recognize-panel-head b{font-size:13px;color:#2b5a48}
+.recognize-panel-head .data-note{margin:0}
+.suggestion-list{display:grid;gap:10px}
+.suggestion-card{background:#fff;border:1px solid #dce5d9;border-radius:8px;padding:12px 14px}
+.suggestion-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px}
+.suggestion-head strong{font-size:12px;color:#2b5a48}
+.suggestion-head span{font-size:11px;color:#6d8674}
+.suggestion-subject{margin:0 0 6px;font-size:11px;color:#6d8674}
+.suggestion-stem{margin:0 0 8px;font-size:13px;line-height:1.6;color:#203c34;white-space:pre-wrap;word-break:break-word}
+.suggestion-block{border-top:1px dashed #e2e9de;padding-top:6px;margin-top:6px}
+.suggestion-block b{display:block;font-size:11px;color:#4d6b5b;margin-bottom:2px}
+.suggestion-block p{margin:0;font-size:12px;line-height:1.6;color:#33503f;white-space:pre-wrap;word-break:break-word}
+.suggestion-confidence{margin:8px 0 0;font-size:11px;line-height:1.6;color:#8a6a2d;background:#fbf5e7;border-radius:5px;padding:6px 8px;word-break:break-word}
+@media(max-width:760px){.upload-control{flex-wrap:wrap;white-space:nowrap}.intake-head{display:block}.intake-head .admin-actions{margin-top:10px}.suggestion-head{flex-direction:column;align-items:flex-start;gap:2px}.suggestion-card{padding:10px 11px}.recognize-panel{padding:12px}}
