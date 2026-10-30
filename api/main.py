@@ -569,22 +569,35 @@ def intake_image(intake_id: str):
 
 @app.post("/api/admin/intakes/{intake_id}/recognize")
 def recognize_intake(intake_id: str):
+    if not rows("SELECT 1 FROM question_intakes WHERE id=?", (intake_id,)):
+        raise HTTPException(404, "上传图片不存在")
+    return recognize_intake_with_provider(intake_id, recognition_provider())
+
+
+def recognition_provider():
+    """Load the configured provider without exposing local configuration details."""
+    try:
+        provider = configured_provider()
+    except Exception:
+        raise HTTPException(503, "识别提供方配置无效，请检查本机配置")
+    if provider is None:
+        raise HTTPException(501, "国产模型尚未配置；图片已保存，可人工录题并提交审核")
+    return provider
+
+
+def recognize_intake_with_provider(intake_id: str, provider):
     item = rows("SELECT stored_name,mime_type FROM question_intakes WHERE id=?", (intake_id,))
     if not item:
         raise HTTPException(404, "上传图片不存在")
     try:
-        provider = configured_provider()
-    except (ImportError, AttributeError, ValueError) as cause:
-        raise HTTPException(503, f"识别提供方配置无效：{cause}")
-    if provider is None:
-        raise HTTPException(501, "国产模型尚未配置；图片已保存，可人工录题并提交审核")
-    try:
         candidates = provider.recognize((UPLOAD_DIR / item[0]["stored_name"]).read_bytes(), item[0]["mime_type"])
         suggestions = [candidate.model_dump() for candidate in candidates]
+        recognition_json = json.dumps(suggestions, ensure_ascii=False)
     except Exception:
         raise HTTPException(502, "识别服务失败，请稍后重试或人工录题")
+    # 空候选是 Provider 正常执行的结果，仍保存为 AI_DRAFT，由管理员决定重新识别或人工录题。
     with db() as con:
-        con.execute("UPDATE question_intakes SET status='AI_DRAFT',recognition_json=? WHERE id=?", (json.dumps(suggestions, ensure_ascii=False), intake_id))
+        con.execute("UPDATE question_intakes SET status='AI_DRAFT',recognition_json=? WHERE id=?", (recognition_json, intake_id))
         bump(con, "content")
     return {"id": intake_id, "status": "AI_DRAFT", "suggestions": suggestions}
 
@@ -595,6 +608,15 @@ class BatchRecognizeIn(BaseModel):
 
 @app.post("/api/admin/intakes/recognize-batch")
 def recognize_batch(payload: BatchRecognizeIn):
-    if configured_provider() is None:
-        raise HTTPException(501, "国产模型尚未配置；图片已保存，可人工录题并提交审核")
-    return [recognize_intake(item_id) for item_id in payload.intake_ids]
+    provider = recognition_provider()
+    results = []
+    for item_id in payload.intake_ids:
+        try:
+            results.append(recognize_intake_with_provider(item_id, provider))
+        except HTTPException as error:
+            results.append({
+                "id": item_id,
+                "status": "ERROR",
+                "error": {"status_code": error.status_code, "detail": error.detail},
+            })
+    return results
