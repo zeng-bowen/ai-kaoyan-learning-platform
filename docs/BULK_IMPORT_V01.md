@@ -7,7 +7,7 @@
 - Python 3.11+；安装 `api/requirements.txt`，其中 PDF 提取和页面渲染依赖 `pdfplumber`。通过仓库根目录运行 `python -m api.bulk_import.cli ...`。
 - 输入仅支持 PDF。可复制文本优先本地提取；仅扫描/文字极少的页面才经既有视觉 Provider 识别。复杂公式、图片表格、答案标题变体无法保证自动识别正确；本地规则转换的公式及按纵向位置关联的图表会警告。
 - `--provider doubao` 是默认选项，但**没有** `--allow-model-call` 时只生成 `PENDING`，绝不发送资料或伪造答案。`--provider mock` 用于演练，生成的 `MOCK` 答案不能入库。真实调用前必须得到资料外发与费用许可。
-- 真题来源需要年份及 HTTPS 来源链接；若无合法来源链接，可先产生批次，但校验阻止入库。不要为了绕过校验将真题改标成原创资料。
+- 真题须有来源名称、原 PDF、SHA-256、页码、年份和考试标签；`source_url` 可空，空值只提示 Warning，填写时须为有效 HTTPS URL。不得为了绕过校验将真题改标成原创资料。
 - 不提交原 PDF、题图、`manifest.json`、`questions.jsonl`、`progress.json`、数据库或密钥。输出目录应放在仓库外，或保持在忽略目录内。不要将此本地管理员工具或演示版管理员 API 暴露到公网。
 
 ## 运行顺序（PowerShell 示例）
@@ -33,6 +33,21 @@ python -m api.bulk_import.cli import 'C:\batches\econ-001' --db 'C:\platform\pla
 ```
 
 `confirm` 会展示单题并要求准确输入 `CONFIRM <item_key>`。只有校验通过、明确确认且确认后未被修改的题会入库；其余保持待处理。每题独立事务，失败记录在 `progress.json`，可改 JSON、重试、复核后再导入。重复运行采用稳定题目 ID，不覆盖已存在 Question；疑似重复只提示，不自动跳过。导入前请备份现有数据库和同目录的题目资源目录。
+
+## 复用历史 PDF 候选（零 AI）
+
+已有 `pdf_question_candidates` 时，不要重新解析整份 PDF。以下两个命令只读历史 SQLite；第二个命令写入**新建、原本为空**的本地批次目录，不写数据库、不调用模型，也不修改历史候选：
+
+```powershell
+python -m api.bulk_import.cli audit-legacy --db 'C:\platform\platform.db' --target-id '实际标签ID' --source-contains '834'
+python -m api.bulk_import.cli normalize-legacy --db 'C:\platform\platform.db' --target-id '实际标签ID' --source-contains '834' --out 'C:\batches\legacy-834-001'
+```
+
+可重复传入 `--year 2023 --year 2022` 缩小年份范围。审计只打印年份、状态和完整率；每个转换批次只允许一份来源 PDF。转换复用同一个单题 Schema、校验器和指纹逻辑，产生 `manifest.json`、`questions.jsonl`、`progress.json`、`assets/`，另有 `pilot-manifest.json` 和使用同一 Schema 的 `pilot.jsonl`（16 条代表题）。批次保存原 PDF 副本，视觉候选只渲染其必要页：同时保留 OCR 坐标局部图和整页供人工核对，不重新 OCR 全书。输出位于 Git 忽略的 `data/` 或仓库外，绝不提交来源资料与真题文本。
+
+历史资料的 `answer` 只映射为 `REFERENCE`，即使其 `analysis` 与 `answer` 相同也绝不当成独立 AI 答案或官方答案。AI 一律 `PENDING`；历史难度不论数值均清空待重新评估；题型只允许名词解释、选择/填空、简答题、论述题、计算题，未知值留空。`processing_meta.legacy_status` 记录七类初筛；`legacy_gate=BLOCKED` 的拆题、视觉、原件缺失候选不得直接重试模型或入库。已找到题目节标题但答案边界不可靠的记录保留 `NEED_AI_SPLIT`，不自动把来源答案分派给新题。局部裁剪未经过语义核验，视觉题的文本答案适配器仍禁止运行。
+
+`pilot-manifest.json` 仅保存组别与候选定位，`pilot.jsonl` 为 8 条文本、5 条视觉、3 条反例的标准单题快照，不代表已经真实调用或通过审核。后续须人工对照 PDF，按需选择极少量题进行模型试验；未经 Product Owner 明确批准，不执行带 `--allow-model-call` 的命令，也不执行 `import`。人工修改 JSON 后运行同一 `validate`；只有处理门槛、独立 AI 答案、主知识点、固定题型和已评估难度满足校验，且逐题确认后才可能入 DRAFT。
 
 ## 批次格式与字段映射
 

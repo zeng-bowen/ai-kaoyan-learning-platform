@@ -16,8 +16,8 @@ from .storage import atomic_json, write_items
 
 
 def _guess_type(stem: str) -> str | None:
-    for needle, result in (("证明", "证明题"), ("计算", "计算题"), ("求", "计算题"),
-                           ("画图", "图形分析题"), ("简述", "简答题"), ("解释", "简答题"),
+    for needle, result in (("计算", "计算题"), ("求", "计算题"),
+                           ("简述", "简答题"), ("解释", "简答题"),
                            ("论述", "论述题")):
         if needle in stem:
             return result
@@ -77,13 +77,18 @@ def prepare(pdf_path: Path, out_dir: Path, *, source_name: str, source_kind: str
         first_page = question["regions"][0]["page"]
         item_key = hashlib.sha256(f"{source_hash}:{ordinal}:{first_page}:{question['number']}".encode()).hexdigest()[:24]
         runs_before = len(tasks.runs)
-        try:
-            generated = tasks.answer(stem_latex)
-            ai = {"status": "MOCK" if type(tasks).__name__ == "MockTasks" else "SUCCEEDED",
-                  "answer": generated["answer"], "analysis": generated["analysis"],
-                  "provider": "mock" if type(tasks).__name__ == "MockTasks" else "doubao-ark"}
-        except ModelError as exc:
-            ai = {"status": "PENDING", "answer": "", "analysis": "", "provider": None, "error": str(exc)}
+        assets = related_assets(question, pages)
+        if assets:
+            ai = {"status": "PENDING", "answer": "", "analysis": "", "provider": None,
+                  "error": "题目含图表；当前答案适配器未接收视觉上下文"}
+        else:
+            try:
+                generated = tasks.answer(stem_latex)
+                ai = {"status": "MOCK" if type(tasks).__name__ == "MockTasks" else "SUCCEEDED",
+                      "answer": generated["answer"], "analysis": generated["analysis"],
+                      "provider": "mock" if type(tasks).__name__ == "MockTasks" else "doubao-ark"}
+            except ModelError as exc:
+                ai = {"status": "PENDING", "answer": "", "analysis": "", "provider": None, "error": str(exc)}
         topic_id = _local_topic(stem_latex, topics)
         question_type = _guess_type(stem_latex)
         difficulty = None
@@ -91,7 +96,8 @@ def prepare(pdf_path: Path, out_dir: Path, *, source_name: str, source_kind: str
             try:
                 suggestion = tasks.recommend(stem_latex, topics)
                 topic_id = topic_id or suggestion.get("topic_id")
-                question_type = question_type or suggestion.get("question_type")
+                question_type = question_type or (suggestion.get("question_type") if suggestion.get("question_type") in
+                                                  {"名词解释", "选择/填空", "简答题", "论述题", "计算题"} else None)
                 difficulty = suggestion.get("difficulty")
             except ModelError:
                 pass
@@ -100,9 +106,8 @@ def prepare(pdf_path: Path, out_dir: Path, *, source_name: str, source_kind: str
             warnings.append("公式由保守规则转换，需人工核对 LaTeX")
         if any(page["scanned"] for page in pages if page["page"] in {r["page"] for r in question["regions"]}):
             warnings.append("扫描页题目/图形关联需人工核对")
-        assets = related_assets(question, pages)
         if assets:
-            warnings.append("图表已按页面纵向位置关联；请核对图题对应关系")
+            warnings.append("图表已按页面纵向位置关联；答案模型未接收视觉信息，AI 答案保持 PENDING")
         items.append({
             "schema_version": SCHEMA_VERSION, "item_key": item_key,
             "source": {"kind": source_kind, "name": source_name, "url": source_url,

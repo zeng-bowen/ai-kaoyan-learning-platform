@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from api.bulk_import.cli import confirm_item, import_batch, validate_batch
+from api.bulk_import.cli import confirm_item, import_batch, retry_item, validate_batch
 from api.bulk_import.contract import validate_item
 from api.bulk_import.pdf import normalize_formula, split_questions
 from api.bulk_import.storage import atomic_json, read_json, write_items
@@ -156,6 +156,39 @@ class LocalImportTests(unittest.TestCase):
             con.close()
         self.assertFalse(any("重复" in error for error in errors))
         self.assertTrue(any("疑似重复题" in warning for warning in warnings))
+
+    def test_past_exam_without_url_warns_but_does_not_block_for_url(self):
+        self.item["source"].update({"kind": "TARGET_PAST_EXAM", "exam_year": 2023, "url": None})
+        errors, warnings = validate_item(self.item, self.batch)
+        self.assertFalse(any("URL" in error or "链接" in error for error in errors))
+        self.assertTrue(any("URL 缺失" in warning for warning in warnings))
+
+    def test_unknown_question_type_never_enters_formal_question(self):
+        self.item["classification"]["question_type"] = "证明题"
+        errors, _ = validate_item(self.item, self.batch)
+        self.assertTrue(any("固定题型" in error for error in errors))
+
+    def test_visual_answer_without_visual_context_is_not_reliable(self):
+        content = self.item["content"]
+        raw = b"not-a-real-image"
+        image = self.batch / "assets" / "test.png"
+        image.write_bytes(raw)
+        content["assets"] = [{"path": "assets/test.png", "sha256": hashlib.sha256(raw).hexdigest(),
+                              "page": 1, "bbox": [0, 0, 10, 10]}]
+        errors, _ = validate_item(self.item, self.batch)
+        self.assertTrue(any("图表未实际提供" in error for error in errors))
+
+    def test_retry_never_calls_text_answer_for_visual_item(self):
+        self.item["content"]["assets"] = [{"path": "assets/graph.png"}]
+        write_items(self.batch, [self.item])
+
+        class Spy:
+            runs = []
+            def answer(self, stem):
+                raise AssertionError("text answer must not be called")
+
+        retry_item(self.batch, self.item["item_key"], Spy())
+        self.assertEqual(read_json(self.batch / "progress.json")["items"][self.item["item_key"]]["status"], "BLOCKED")
 
 
 class PdfRulesTests(unittest.TestCase):

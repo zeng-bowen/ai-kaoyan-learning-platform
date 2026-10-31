@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from .contract import QUESTION_TYPES
+
 class ModelError(RuntimeError):
     """Safe, credential-free model failure."""
 
@@ -152,7 +154,9 @@ class DoubaoTasks:
         return {"answer": result["answer"].strip(), "analysis": result["analysis"].strip()}
 
     def recommend(self, stem: str, topics: list[dict[str, str]]) -> dict[str, Any]:
-        prompt = ("从给定知识点中推荐且只推荐一个最匹配 ID，同时给出题型和 1-5 难度；不确定时 topic_id 为 null。"
+        prompt = ("从给定知识点中推荐且只推荐一个最匹配 ID，一次返回 topic_id、question_type、difficulty。"
+                  "题型只允许名词解释、选择/填空、简答题、论述题、计算题；难度须重新评估为 1-5。"
+                  "不确定的字段为 null，不得照搬未核验的历史默认难度。"
                   "仅输出 JSON 对象 {\"topic_id\":null,\"question_type\":null,\"difficulty\":null}。\n知识点："
                   + json.dumps(topics[:200], ensure_ascii=False) + "\n题目：" + stem[:12000])
         result = self._call("tag_recommendation", prompt)
@@ -160,7 +164,7 @@ class DoubaoTasks:
         topic_id = result.get("topic_id")
         difficulty = result.get("difficulty")
         return {"topic_id": topic_id if topic_id in allowed else None,
-                "question_type": result.get("question_type") if isinstance(result.get("question_type"), str) else None,
+                "question_type": result.get("question_type") if result.get("question_type") in QUESTION_TYPES else None,
                 "difficulty": difficulty if type(difficulty) is int and 1 <= difficulty <= 5 else None}
 
     def vision(self, image_bytes: bytes, mime_type: str) -> list[dict[str, Any]]:

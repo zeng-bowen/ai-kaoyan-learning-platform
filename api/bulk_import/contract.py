@@ -13,6 +13,15 @@ from urllib.parse import urlparse
 SCHEMA_VERSION = "0.1"
 SOURCE_TYPES = {"TARGET_PAST_EXAM", "RELATED_PAST_EXAM", "CURATED_EXERCISE", "AI_GENERATED"}
 ANSWER_KINDS = {"NONE", "REFERENCE", "OFFICIAL", "UNKNOWN"}
+QUESTION_TYPES = {"名词解释", "选择/填空", "简答题", "论述题", "计算题"}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def canonical_digest(value: dict[str, Any]) -> str:
@@ -27,7 +36,7 @@ def stem_fingerprint(stem: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def validate_item(item: dict[str, Any], batch_dir: Path, con=None) -> tuple[list[str], list[str]]:
+def validate_item(item: dict[str, Any], batch_dir: Path, con=None, *, verified_source_hash: str | None = None) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = [warning for warning in item.get("validation", {}).get("warnings", [])
                            if not warning.startswith(("疑似重复题：", "疑似本批重复题："))]
@@ -58,16 +67,24 @@ def validate_item(item: dict[str, Any], batch_dir: Path, con=None) -> tuple[list
             source_asset = "assets/source-" + str(source.get("file_sha256")) + ".pdf"
             if manifest.get("source_asset") != source_asset or not re.fullmatch(r"[0-9a-f]{64}", str(source.get("file_sha256", ""))):
                 errors.append("原始 PDF 资源位置无效")
-            elif not (batch_dir / source_asset).is_file() or hashlib.sha256((batch_dir / source_asset).read_bytes()).hexdigest() != source.get("file_sha256"):
+            elif not (batch_dir / source_asset).is_file() or (
+                (verified_source_hash if verified_source_hash is not None else sha256_file(batch_dir / source_asset))
+                != source.get("file_sha256")
+            ):
                 errors.append("原始 PDF 缺失或哈希不匹配")
         except (OSError, ValueError):
             errors.append("批次 manifest 无效")
     if source.get("is_demo"):
         errors.append("演示资料不得导入正式题库")
     if source.get("kind") in {"TARGET_PAST_EXAM", "RELATED_PAST_EXAM"}:
-        url = urlparse(source.get("url") or "")
-        if not source.get("exam_year") or url.scheme != "https" or not url.hostname:
-            errors.append("真题必须填写年份和 HTTPS 来源链接")
+        if not source.get("exam_year"):
+            errors.append("真题必须填写考试年份")
+        if not source.get("url"):
+            warnings.append("真题来源 URL 缺失；请核对原始 PDF 与页码")
+    if source.get("url"):
+        url = urlparse(source["url"])
+        if url.scheme != "https" or not url.hostname:
+            errors.append("来源 URL 必须为有效 HTTPS 地址")
     if not scope.get("target_id"):
         errors.append("适用考试标签待确认")
     if not isinstance(source.get("pages"), list) or not source["pages"] or any(
@@ -102,12 +119,18 @@ def validate_item(item: dict[str, Any], batch_dir: Path, con=None) -> tuple[list
                        and not run.get("error") and run.get("provider") != "mock"]
     if ai.get("status") == "SUCCEEDED" and not successful_runs:
         errors.append("AI 答案缺少非 Mock 模型调用记录")
+    if content.get("assets") and ai.get("status") == "SUCCEEDED" and not item.get("processing_meta", {}).get("visual_context_provided"):
+        errors.append("图表未实际提供给答案模型，AI 答案不得标为成功")
     if not classification.get("topic_id"):
         errors.append("主知识点待确认")
     if not classification.get("question_type"):
         errors.append("题型待确认")
+    elif classification["question_type"] not in QUESTION_TYPES:
+        errors.append("题型不在固定题型集合内")
     if type(classification.get("difficulty")) is not int or not 1 <= classification["difficulty"] <= 5:
         errors.append("难度须为 1–5")
+    if item.get("processing_meta", {}).get("legacy_gate") == "BLOCKED":
+        errors.append("历史候选需先完成拆题、视觉或原件人工核验")
     for asset in content.get("assets", []):
         relative = asset.get("path", "")
         path = (batch_dir / relative).resolve()

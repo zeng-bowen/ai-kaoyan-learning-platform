@@ -27,8 +27,10 @@ def read_items(batch_dir: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def write_items(batch_dir: Path, items: list[dict[str, Any]]) -> None:
-    path = batch_dir / "questions.jsonl"
+def write_items(batch_dir: Path, items: list[dict[str, Any]], *, filename: str = "questions.jsonl") -> None:
+    if filename not in {"questions.jsonl", "pilot.jsonl"}:
+        raise ValueError("unsupported JSONL output")
+    path = batch_dir / filename
     temp = path.with_suffix(".jsonl.tmp")
     with temp.open("w", encoding="utf-8", newline="\n") as stream:
         for item in items:
