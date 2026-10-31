@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from api.recognition import configured_provider
+from api.migrations.bulk_import_v01 import migrate as migrate_bulk_import_v01
 
 DB_PATH = Path(os.environ.get("ECON_DB_PATH", Path(__file__).resolve().parents[1] / "data" / "platform.db"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -68,6 +69,7 @@ with db() as con:
     }.items():
         if column not in question_columns:
             con.execute(f"ALTER TABLE questions ADD COLUMN {column} {definition}")
+    migrate_bulk_import_v01(con)
     intake_columns = {row["name"] for row in con.execute("PRAGMA table_info(question_intakes)")}
     if "recognition_json" not in intake_columns:
         con.execute("ALTER TABLE question_intakes ADD COLUMN recognition_json TEXT")
@@ -409,8 +411,9 @@ class QuestionIn(BaseModel):
     question_type: str
     difficulty: int = Field(ge=1, le=5)
     stem: str = Field(min_length=5)
-    answer: str = Field(min_length=1)
-    analysis: str = Field(min_length=1)
+    # Incomplete source answers are permitted in DRAFT only; approval still checks both.
+    answer: str = ""
+    analysis: str = ""
     intake_id: str | None = None
 
 
@@ -464,15 +467,17 @@ def update_question(question_id: str, payload: QuestionIn):
         raise HTTPException(422, "题目 ID 不可修改")
     try:
         with db() as con:
-            current = con.execute("SELECT catalog_number FROM questions WHERE id=?", (question_id,)).fetchone()
+            current = con.execute("SELECT catalog_number,answer,analysis FROM questions WHERE id=?", (question_id,)).fetchone()
             if not current:
                 raise HTTPException(404, "题目不存在")
             data["catalog_number"] = data["catalog_number"] or current["catalog_number"]
+            answer_changed = data["answer"] != current["answer"] or data["analysis"] != current["analysis"]
             con.execute("""UPDATE questions SET catalog_number=:catalog_number,target_id=:target_id,topic_id=:topic_id,
                 source_type=:source_type,source_name=:source_name,source_url=:source_url,source_verified=:source_verified,
                 exam_year=:exam_year,question_type=:question_type,difficulty=:difficulty,stem=:stem,answer=:answer,
-                analysis=:analysis,intake_id=:intake_id,review_status='DRAFT',reviewed_at=NULL,review_note='',updated_at=:updated_at
-                WHERE id=:id""", {**data, "updated_at": datetime.now(timezone.utc).isoformat()})
+                analysis=:analysis,intake_id=:intake_id,source_answer_kind=CASE WHEN :answer_changed THEN 'UNKNOWN' ELSE source_answer_kind END,
+                review_status='DRAFT',reviewed_at=NULL,review_note='',updated_at=:updated_at
+                WHERE id=:id""", {**data, "answer_changed": answer_changed, "updated_at": datetime.now(timezone.utc).isoformat()})
             if data["intake_id"]:
                 con.execute("UPDATE question_intakes SET status='DRAFT_LINKED' WHERE id=?", (data["intake_id"],))
             bump(con, "content")
