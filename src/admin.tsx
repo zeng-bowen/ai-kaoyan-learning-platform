@@ -11,6 +11,13 @@ type QuestionDraft = { id: string; catalog_number: string; target_id: string; to
 type Intake = { id: string; original_name: string; status: string; created_at: string };
 type Metrics = { active_training_sessions: number; attempt_count: number; published_questions: number; correct_rate: number | null; difficulty_stats: { difficulty: number; attempts: number; average_self_rating: number }[]; method: string };
 type Section = '总览' | '院校与考试' | '知识目录' | '题目中心';
+type Suggestion = { stem: string; subject: string; difficulty: number | null; answer: string; analysis: string; question_type: string; confidence_note: string };
+type RecognizeStatus = 'idle' | 'loading' | 'success' | 'empty' | 'not-configured' | 'service-error' | 'network-error' | 'error';
+type RecognizeState = { status: RecognizeStatus; message?: string; suggestions?: Suggestion[] };
+class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) { super(message); this.name = 'ApiError'; this.status = status; }
+}
 const API = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000';
 const emptyTarget = (): TargetDraft => ({ school: '', exam_label: '', note: '' });
 const emptyTopic = (): Topic => ({ id: '', subject: '', module: '', name: '', summary: '', source_name: '', source_url: '', review_status: 'DRAFT', target_ids: [] });
@@ -37,11 +44,18 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageName, setImageName] = useState('');
+  const [recognition, setRecognition] = useState<Record<string, RecognizeState>>({});
+  const recognizing = useRef<Set<string>>(new Set());
   const versions = useRef<{ content: number; activity: number } | null>(null);
 
   async function request<T>(path: string, method = 'GET', body?: object): Promise<T> {
-    const response = await fetch(API + path, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
-    if (!response.ok) { const detail = await response.json().catch(() => null); throw new Error(detail?.detail || `请求失败（${response.status}）`); }
+    let response: Response;
+    try {
+      response = await fetch(API + path, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+    } catch {
+      throw new ApiError('无法连接本地数据服务，请确认后端已启动。', 0);
+    }
+    if (!response.ok) { const detail = await response.json().catch(() => null); throw new ApiError(detail?.detail || `请求失败（${response.status}）`, response.status); }
     return response.json();
   }
   async function refresh() {
@@ -118,6 +132,85 @@ function App() {
       if (imageUrl) URL.revokeObjectURL(imageUrl);
       setImageUrl(url); setImageName(item.original_name);
     } catch (cause) { setError((cause as Error).message); }
+  }
+  function updateRecognition(intakeId: string, next: RecognizeState) {
+    setRecognition(previous => ({ ...previous, [intakeId]: next }));
+  }
+  async function recognizeIntake(intake: Intake) {
+    if (recognizing.current.has(intake.id)) return;
+    recognizing.current.add(intake.id);
+    updateRecognition(intake.id, { status: 'loading' });
+    try {
+      const data = await request<{ status?: string; suggestions?: Suggestion[] }>(`/api/admin/intakes/${encodeURIComponent(intake.id)}/recognize`, 'POST');
+      const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+      if (suggestions.length) {
+        updateRecognition(intake.id, { status: 'success', suggestions });
+        setNotice(`已获取「${intake.original_name}」的 ${suggestions.length} 条 AI 建议；请人工核对后带入草稿，AI 建议不会自动发布。`);
+      } else {
+        updateRecognition(intake.id, { status: 'empty', message: 'AI 未返回候选题，请检查图片是否清晰，或直接人工录题。' });
+      }
+      refresh().catch(() => undefined);
+    } catch (cause) {
+      const failure = cause as ApiError;
+      if (failure.status === 501) updateRecognition(intake.id, { status: 'not-configured', message: failure.message });
+      else if (failure.status === 502 || failure.status === 503) updateRecognition(intake.id, { status: 'service-error', message: failure.message });
+      else if (failure.status === 0) updateRecognition(intake.id, { status: 'network-error', message: failure.message });
+      else updateRecognition(intake.id, { status: 'error', message: failure.message || '识别失败，请稍后重试。' });
+    } finally {
+      recognizing.current.delete(intake.id);
+    }
+  }
+  function applySuggestion(intake: Intake, suggestion: Suggestion) {
+    const hasContent = editingQuestion || Boolean(questionDraft.stem.trim() || questionDraft.answer.trim() || questionDraft.analysis.trim());
+    if (hasContent) {
+      const prompt = editingQuestion
+        ? '当前正在编辑已有题目。使用 AI 建议将切换为为该图片新建草稿，尚未保存的修改会丢失。确认继续？'
+        : '题目草稿中已有内容。使用 AI 建议会覆盖其中的题干、答案、解析、题型和难度；考试标签、知识点与来源保持不变。确认覆盖？';
+      if (!window.confirm(prompt)) return;
+    }
+    const base = editingQuestion ? emptyQuestion() : questionDraft;
+    const next = {
+      ...base,
+      intake_id: intake.id,
+      stem: suggestion.stem?.trim() ? suggestion.stem : base.stem,
+      answer: suggestion.answer?.trim() ? suggestion.answer : base.answer,
+      analysis: suggestion.analysis?.trim() ? suggestion.analysis : base.analysis,
+      question_type: suggestion.question_type?.trim() ? suggestion.question_type : base.question_type,
+      difficulty: suggestion.difficulty ?? base.difficulty,
+    };
+    setQuestionDraft(next);
+    setEditingQuestion(false);
+    setSection('题目中心');
+    setNotice(`已将「${intake.original_name}」的 AI 建议带入题目草稿；请补充并核对考试标签、知识点、来源后保存为待审核草稿。AI 建议不会自动发布。`);
+    window.setTimeout(() => document.getElementById('question-editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+  }
+  function renderRecognition(item: Intake, state: RecognizeState) {
+    const retry = <button onClick={() => void recognizeIntake(item)}>重试识别</button>;
+    if (state.status === 'loading') {
+      return <div className="recognize-panel" role="status" aria-live="polite" aria-busy="true"><p className="recognize-line">正在识别图片，请稍候…</p></div>;
+    }
+    if (state.status === 'success') {
+      const suggestions = state.suggestions || [];
+      return <div className="recognize-panel">
+        <div className="recognize-panel-head"><b>AI 建议 · {suggestions.length} 条</b><span className="data-note">仅供参考，需人工核对；不会自动审核或发布。</span></div>
+        <div className="suggestion-list">{suggestions.map((suggestion, index) => <div className="suggestion-card" key={index}>
+          <div className="suggestion-head"><strong>建议 {index + 1}</strong><span>{suggestion.question_type || '题型未识别'} · 难度 {suggestion.difficulty ?? '—'}</span></div>
+          {suggestion.subject ? <p className="suggestion-subject">科目线索：{suggestion.subject}</p> : null}
+          <p className="suggestion-stem">{suggestion.stem}</p>
+          {suggestion.answer ? <div className="suggestion-block"><b>答案建议</b><p>{suggestion.answer}</p></div> : null}
+          {suggestion.analysis ? <div className="suggestion-block"><b>解析建议</b><p>{suggestion.analysis}</p></div> : null}
+          {suggestion.confidence_note ? <p className="suggestion-confidence">置信说明：{suggestion.confidence_note}</p> : null}
+          <div className="admin-actions"><button className="primary" onClick={() => applySuggestion(item, suggestion)}>使用此建议</button></div>
+        </div>)}</div>
+      </div>;
+    }
+    const message = state.message || '识别失败，请稍后重试。';
+    const tone = state.status === 'not-configured' ? 'warn' : state.status === 'empty' ? '' : 'danger';
+    return <div className="recognize-panel" role="status" aria-live="polite">
+      <p className={`recognize-line ${tone}`.trim()}>{message}</p>
+      <p className="data-note">{state.status === 'not-configured' ? '图片已保留，可继续「查看原图」或「人工录题」。' : '仍可「查看原图」或「人工录题」，不影响现有流程。'}</p>
+      <div className="admin-actions">{retry}</div>
+    </div>;
   }
   const matches = questions.filter(item => (!filters.target_id || item.target_id === filters.target_id) && (!filters.exam_year || item.exam_year === Number(filters.exam_year)) && (!filters.topic_id || item.topic_id === filters.topic_id) && (!filters.source_type || item.source_type === filters.source_type) && (!filters.review_status || item.review_status === filters.review_status) && (!filters.search || `${item.catalog_number} ${item.id} ${item.stem}`.toLowerCase().includes(filters.search.toLowerCase())));
   const years = [...new Set(questions.map(item => item.exam_year).filter((value): value is number => value !== null))].sort((a, b) => b - a);
@@ -201,7 +294,7 @@ function App() {
         <label>解析<textarea rows={4} value={questionDraft.analysis} onChange={event => setQuestionDraft({ ...questionDraft, analysis: event.target.value })} /></label>
         <div className="admin-actions"><button className="primary" disabled={busy || !questionDraft.target_id || !topicOptions.some(item => item.id === questionDraft.topic_id) || !questionDraft.source_name || !questionDraft.stem || !questionDraft.answer || !questionDraft.analysis} onClick={() => void saveQuestion()}>{editingQuestion ? '保存修改并重新审核' : '保存为待审核草稿'}</button>{editingQuestion && <button onClick={() => newQuestion()}>取消编辑</button>}</div>
       </div>
-      <div className="admin-panel" id="question-intakes"><h2>题目资料上传 · {intakes.length} 张图片</h2><p>支持批量上传 PNG、JPEG、WebP 截图，每张不超过 8 MB。图片仅进入管理员队列，不会自动发布到用户端。</p><label className="upload-control">选择图片<input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={busy} onChange={event => { void upload(event.target.files); event.target.value = ''; }} /></label><p className="data-note">国产大模型识别接口已预留，尚未配置；所有识别结果仍需人工审核后发布。</p><div className="admin-list">{intakes.map(item => <div key={item.id}><div><strong>{item.original_name}</strong><small>{new Date(item.created_at).toLocaleString('zh-CN')} · {item.status}</small></div><div className="admin-actions"><button onClick={() => void showImage(item)}>查看原图</button><button onClick={() => newQuestion(item.id)}>人工录题</button></div></div>)}{!intakes.length && <p className="admin-empty">上传截图后会在这里逐张列出。</p>}</div></div>
+      <div className="admin-panel" id="question-intakes"><h2>题目资料上传 · {intakes.length} 张图片</h2><p>支持批量上传 PNG、JPEG、WebP 截图，每张不超过 8 MB。图片仅进入管理员队列，不会自动发布到用户端。</p><label className="upload-control">选择图片<input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={busy} onChange={event => { void upload(event.target.files); event.target.value = ''; }} /></label><p className="data-note">AI 识别需逐张点击触发，结果只作为人工核对建议；未配置或失败时仍可「查看原图」和「人工录题」。</p><div className="admin-list">{intakes.map(item => { const state = recognition[item.id]; const loading = state?.status === 'loading'; return <div className="intake-item" key={item.id}><div className="intake-head"><div><strong>{item.original_name}</strong><small>{new Date(item.created_at).toLocaleString('zh-CN')} · {item.status}</small></div><div className="admin-actions"><button onClick={() => void showImage(item)}>查看原图</button><button onClick={() => newQuestion(item.id)}>人工录题</button><button className="recognize-trigger" disabled={loading} aria-busy={loading} onClick={() => void recognizeIntake(item)}>{loading ? '识别中…' : state?.status === 'success' ? '重新识别' : 'AI 识别'}</button></div></div>{state && state.status !== 'idle' && renderRecognition(item, state)}</div>; })}{!intakes.length && <p className="admin-empty">上传截图后会在这里逐张列出。</p>}</div></div>
       {imageUrl && <div className="admin-image-preview"><div><strong>{imageName}</strong><button onClick={() => { URL.revokeObjectURL(imageUrl); setImageUrl(null); }}>关闭</button></div><img src={imageUrl} alt={`上传题目截图：${imageName}`} /></div>}
     </section>;
   }
