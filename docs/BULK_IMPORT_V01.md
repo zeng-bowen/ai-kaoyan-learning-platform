@@ -6,7 +6,7 @@
 
 - Python 3.11+；安装 `api/requirements.txt`，其中 PDF 提取和页面渲染依赖 `pdfplumber`。通过仓库根目录运行 `python -m api.bulk_import.cli ...`。
 - 输入仅支持 PDF。可复制文本优先本地提取；仅扫描/文字极少的页面才经既有视觉 Provider 识别。复杂公式、图片表格、答案标题变体无法保证自动识别正确；本地规则转换的公式及按纵向位置关联的图表会警告。
-- `--provider doubao` 是默认选项，但**没有** `--allow-model-call` 时只生成 `PENDING`，绝不发送资料或伪造答案。`--provider mock` 用于演练，生成的 `MOCK` 答案不能入库。真实调用前必须得到资料外发与费用许可。
+- `--provider doubao` 是默认选项；可选 `none`、`mock`、`doubao`、`deepseek`。**没有** `--allow-model-call` 时真实 Provider 只生成 `PENDING`，绝不发送资料或伪造答案。`--provider mock` 用于演练，生成的 `MOCK` 答案不能入库。真实题目调用前必须得到资料外发与费用许可。
 - 真题须有来源名称、原 PDF、SHA-256、页码、年份和考试标签；`source_url` 可空，空值只提示 Warning，填写时须为有效 HTTPS URL。不得为了绕过校验将真题改标成原创资料。
 - 不提交原 PDF、题图、`manifest.json`、`questions.jsonl`、`progress.json`、数据库或密钥。输出目录应放在仓库外，或保持在忽略目录内。不要将此本地管理员工具或演示版管理员 API 暴露到公网。
 
@@ -68,7 +68,32 @@ python -m api.bulk_import.cli normalize-legacy --db 'C:\platform\platform.db' --
 
 ## 模型配置与安全
 
-文本任务仅适配当前豆包 Ark 服务：`DOUBAO_ARK_API_KEY`、`DOUBAO_ARK_MODEL` 必填；可选 `DOUBAO_ARK_BASE_URL`（必须 HTTPS）、`DOUBAO_ARK_TIMEOUT_SECONDS`（默认 30）、`DOUBAO_ARK_RETRIES`（最多 3 次额外重试）。扫描页视觉任务继续使用现有 `ECON_RECOGNITION_PROVIDER` 与其豆包配置。按实际账单费率配置 `DOUBAO_ARK_INPUT_PRICE_PER_MILLION`、`DOUBAO_ARK_OUTPUT_PRICE_PER_MILLION`、`DOUBAO_ARK_PRICE_CURRENCY` 才会计算估算成本；未配置则明确为 `null`，不虚构费用。`processing_meta.model_runs` 记录任务、模型、耗时、尝试数、tokens 和估算成本，不记录密钥。不要把密钥放到前端、JSONL、日志或 Git。
+文本任务支持豆包 Ark 与 DeepSeek 两个轻量适配器，共用 `answer_generation`（`answer`、`analysis`）和 `tag_recommendation`（现有 `topic_id`、固定题型、难度 1–5）契约。DeepSeek 不承担视觉或拆题；扫描页视觉仍复用现有 `ECON_RECOGNITION_PROVIDER`，不修改其契约。真实 Provider 默认关闭，必须显式添加 `--allow-model-call`。
+
+| Provider | 必填环境变量 | 可选环境变量 | 默认 Base URL |
+| --- | --- | --- | --- |
+| 豆包 | `DOUBAO_ARK_API_KEY`, `DOUBAO_ARK_MODEL` | `DOUBAO_ARK_BASE_URL`, `DOUBAO_ARK_TIMEOUT_SECONDS`, `DOUBAO_ARK_RETRIES` | `https://ark.cn-beijing.volces.com/api/v3` |
+| DeepSeek | `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL` | `DEEPSEEK_BASE_URL`, `DEEPSEEK_TIMEOUT_SECONDS`, `DEEPSEEK_RETRIES` | `https://api.deepseek.com` |
+
+超时默认 30 秒；额外重试默认 2 次、最多 3 次，仅对 429、暂时性 5xx 与网络/超时错误重试；401/403 和 JSON 格式错误不重试。Base URL 必须为 HTTPS。两家费用估算均只使用运营者另行配置的 `{前缀}_INPUT_PRICE_PER_MILLION`、`{前缀}_OUTPUT_PRICE_PER_MILLION`、`{前缀}_PRICE_CURRENCY`（前缀分别为 `DOUBAO_ARK` 和 `DEEPSEEK`）；费率或 usage 缺失时 `estimated_cost=null`，不得当成免费。`processing_meta.model_runs` 统一记录 task、provider、model、tokens、duration_ms、attempts、estimated_cost、currency、脱敏 error。密钥仅从后端环境变量读取，不进入前端、JSONL、数据库、日志或 Git。
+
+PowerShell 仅在本机当前会话设置，下面占位内容须由管理员在本机替换，不要发到聊天或提交：
+
+```powershell
+$env:DOUBAO_ARK_API_KEY = '在本机填入豆包密钥'
+$env:DOUBAO_ARK_MODEL = '在本机填入 Ark 模型或接入点 ID'
+$env:DEEPSEEK_API_KEY = '在本机填入 DeepSeek 密钥'
+$env:DEEPSEEK_MODEL = '在本机填入已开通的 DeepSeek 模型 ID'
+```
+
+连接 Smoke Test 仅发送一条通用、无版权的需求曲线问题，不读取 PDF，不写数据库；输出 JSON 格式检查与调用元数据，不打印答案正文。**本轮未实际执行以下付费命令**，须待 Product Owner 明确批准后使用：
+
+```powershell
+python -m api.bulk_import.cli model-smoke --provider doubao --allow-model-call
+python -m api.bulk_import.cli model-smoke --provider deepseek --allow-model-call
+```
+
+无需密钥的本地门槛演练可运行 `python -m api.bulk_import.cli model-smoke --provider mock`。自动化测试全部 Mock HTTP，不使用真实密钥；Smoke Test 仅证明连接、模型配置、JSON 和 usage 响应，不证明经济学答案质量。
 
 ## 当前展示与验收限制
 

@@ -116,7 +116,7 @@ def retry_item(batch_dir: Path, item_key: str, tasks, topics: list[dict] | None 
             generated = tasks.answer(item["content"]["stem_latex"])
             item["ai_answer"] = {"status": "MOCK" if type(tasks).__name__ == "MockTasks" else "SUCCEEDED",
                                  "answer": generated["answer"], "analysis": generated["analysis"],
-                                 "provider": "mock" if type(tasks).__name__ == "MockTasks" else "doubao-ark"}
+                                 "provider": tasks.provider_id}
             state["status"] = "PENDING"
             state.pop("error", None)
         except ModelError as exc:
@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--exam-year", type=int)
     create.add_argument("--source-url")
     create.add_argument("--db", type=Path)
-    create.add_argument("--provider", choices=["none", "mock", "doubao"], default="doubao")
+    create.add_argument("--provider", choices=["none", "mock", "doubao", "deepseek"], default="doubao")
     create.add_argument("--allow-model-call", action="store_true")
     for name in ("audit-legacy", "normalize-legacy"):
         legacy = sub.add_parser(name, help="只读审计历史 PDF 候选，或零 AI 导出 V0.1 批次")
@@ -199,8 +199,11 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--item-key", required=True)
         if name == "retry":
             command.add_argument("--db", type=Path)
-            command.add_argument("--provider", choices=["none", "mock", "doubao"], default="doubao")
+            command.add_argument("--provider", choices=["none", "mock", "doubao", "deepseek"], default="doubao")
             command.add_argument("--allow-model-call", action="store_true")
+    smoke = sub.add_parser("model-smoke", help="极短通用题验证文本模型连接；真实调用必须显式授权")
+    smoke.add_argument("--provider", choices=["mock", "doubao", "deepseek"], required=True)
+    smoke.add_argument("--allow-model-call", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "audit-legacy":
@@ -208,6 +211,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "normalize-legacy":
             print(json.dumps(normalize_legacy(args.db, args.out, args.target_id,
                                               args.source_contains, args.year), ensure_ascii=False, indent=2))
+        elif args.command == "model-smoke":
+            if args.provider != "mock" and not args.allow_model_call:
+                raise ModelError("真实连接测试需要 --allow-model-call；本轮未经批准请勿使用")
+            tasks = make_tasks(args.provider, args.allow_model_call)
+            answer = tasks.answer("需求曲线向右下方倾斜通常反映什么经济关系？")
+            print(json.dumps({"format_valid": bool(answer["answer"] and isinstance(answer["analysis"], str)),
+                              "model_run": tasks.runs[-1]}, ensure_ascii=False, indent=2))
         elif args.command == "prepare":
             tasks = make_tasks(args.provider, args.allow_model_call)
             topics = list_topics(args.db, args.target_id) if args.db else []

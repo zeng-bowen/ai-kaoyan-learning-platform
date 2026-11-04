@@ -86,7 +86,7 @@ def prepare(pdf_path: Path, out_dir: Path, *, source_name: str, source_kind: str
                 generated = tasks.answer(stem_latex)
                 ai = {"status": "MOCK" if type(tasks).__name__ == "MockTasks" else "SUCCEEDED",
                       "answer": generated["answer"], "analysis": generated["analysis"],
-                      "provider": "mock" if type(tasks).__name__ == "MockTasks" else "doubao-ark"}
+                      "provider": tasks.provider_id}
             except ModelError as exc:
                 ai = {"status": "PENDING", "answer": "", "analysis": "", "provider": None, "error": str(exc)}
         topic_id = _local_topic(stem_latex, topics)
