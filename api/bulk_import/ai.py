@@ -87,7 +87,7 @@ class _TextTasks:
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 2000,
+            "max_tokens": 4000 if task == "answer_generation" else 2000,
         }
         if self.json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -107,7 +107,11 @@ class _TextTasks:
                 usage = payload.get("usage") or {}
                 input_tokens = usage.get("prompt_tokens")
                 output_tokens = usage.get("completion_tokens")
-                content = payload["choices"][0]["message"]["content"]
+                choice = payload["choices"][0]
+                if choice.get("finish_reason") == "length":
+                    last_error = "OUTPUT_TRUNCATED"
+                    break
+                content = choice["message"]["content"]
                 if not isinstance(content, str):
                     raise ModelError("model content is not text")
                 cleaned = content.strip()

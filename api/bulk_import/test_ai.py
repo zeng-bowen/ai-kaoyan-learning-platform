@@ -16,8 +16,8 @@ from api.bulk_import.cli import main
 
 
 class FakeResponse:
-    def __init__(self, content: str, usage: dict | None = None):
-        self.payload = json.dumps({"choices": [{"message": {"content": content}}],
+    def __init__(self, content: str, usage: dict | None = None, finish_reason: str | None = None):
+        self.payload = json.dumps({"choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
                                    "usage": usage or {}}).encode()
 
     def __enter__(self):
@@ -61,6 +61,7 @@ class TextProviderTests(unittest.TestCase):
                     request = send.call_args.args[0]
                     self.assertEqual(request.full_url, url)
                     self.assertEqual(json.loads(request.data)["model"], "fixture-model")
+                    self.assertEqual(json.loads(request.data)["max_tokens"], 4000)
                     if provider == "deepseek":
                         self.assertEqual(json.loads(request.data)["response_format"], {"type": "json_object"})
                     run = tasks.runs[-1]
@@ -92,6 +93,17 @@ class TextProviderTests(unittest.TestCase):
                     self.assertEqual(tasks.recommend("求均衡", [{"id": "known", "name": "均衡"}]),
                                      {"topic_id": "known", "question_type": "计算题", "difficulty": 3})
                     self.assertEqual(tasks.runs[-1]["task"], "tag_recommendation")
+
+    def test_output_limit_is_classified_without_json_retry(self):
+        env = {"DEEPSEEK_API_KEY": "fixture-secret", "DEEPSEEK_MODEL": "fixture-model"}
+        response = FakeResponse('{"answer":"partial', {"prompt_tokens": 130, "completion_tokens": 4000}, "length")
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen", return_value=response) as send:
+            tasks = DeepSeekTasks()
+            with self.assertRaisesRegex(ModelError, "OUTPUT_TRUNCATED"):
+                tasks.answer("测试题干")
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(tasks.runs[-1]["output_tokens"], 4000)
+            self.assertEqual(tasks.runs[-1]["error"], "OUTPUT_TRUNCATED")
 
     def test_auth_failure_is_sanitized_and_never_retried(self):
         env = {"DEEPSEEK_API_KEY": "fixture-secret", "DEEPSEEK_MODEL": "fixture-model"}

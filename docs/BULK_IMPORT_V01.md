@@ -77,6 +77,8 @@ python -m api.bulk_import.cli normalize-legacy --db 'C:\platform\platform.db' --
 
 超时默认 30 秒；额外重试默认 2 次、最多 3 次，仅对 429、暂时性 5xx 与网络/超时错误重试；401/403 和 JSON 格式错误不重试。Base URL 必须为 HTTPS。两家费用估算均只使用运营者另行配置的 `{前缀}_INPUT_PRICE_PER_MILLION`、`{前缀}_OUTPUT_PRICE_PER_MILLION`、`{前缀}_PRICE_CURRENCY`（前缀分别为 `DOUBAO_ARK` 和 `DEEPSEEK`）；费率或 usage 缺失时 `estimated_cost=null`，不得当成免费。`processing_meta.model_runs` 统一记录 task、provider、model、tokens、duration_ms、attempts、estimated_cost、currency、脱敏 error。密钥仅从后端环境变量读取，不进入前端、JSONL、数据库、日志或 Git。
 
+首轮文字 Pilot 中三次长答案均在旧的 2,000 输出 Token 上限处返回无效 JSON。现在两家共用的答案上限为 4,000，标签任务仍为 2,000；Prompt 和题干不因 Provider 改动。若 API 明确返回 `finish_reason=length`，记录 `OUTPUT_TRUNCATED`，不盲目重复调用。已生成的成功结果不应为此重跑。
+
 PowerShell 仅在本机当前会话设置，下面占位内容须由管理员在本机替换，不要发到聊天或提交：
 
 ```powershell
