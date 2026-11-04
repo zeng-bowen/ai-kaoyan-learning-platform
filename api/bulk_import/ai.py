@@ -133,7 +133,7 @@ class _TextTasks:
                 last_error = "HTTP_" + str(exc.code)
                 if exc.code not in (429, 500, 502, 503, 504):
                     break
-            except (urllib.error.URLError, socket.timeout, TimeoutError):
+            except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
                 last_error = "NETWORK_OR_TIMEOUT"
             except (ValueError, KeyError, IndexError, TypeError, AttributeError, ModelError):
                 last_error = "INVALID_STRUCTURED_RESPONSE"

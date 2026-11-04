@@ -149,6 +149,15 @@ class TextProviderTests(unittest.TestCase):
             with self.assertRaises(ModelError):
                 tasks.structure("fixture")
 
+    def test_unexpected_network_error_is_sanitized(self):
+        env = {"DEEPSEEK_API_KEY": "fixture-secret", "DEEPSEEK_MODEL": "fixture-model",
+               "DEEPSEEK_RETRIES": "0"}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen", side_effect=OSError("fixture-secret")):
+            tasks = DeepSeekTasks()
+            with self.assertRaises(ModelError) as raised:
+                tasks.answer("测试题干")
+            self.assertNotIn("fixture-secret", str(raised.exception) + json.dumps(tasks.runs))
+
     def test_smoke_uses_generic_prompt_and_prints_only_metadata(self):
         env = {"DEEPSEEK_API_KEY": "fixture-secret", "DEEPSEEK_MODEL": "fixture-model"}
         stdout = io.StringIO()
