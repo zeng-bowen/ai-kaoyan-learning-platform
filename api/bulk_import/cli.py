@@ -197,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     enrich.add_argument("--db", type=Path, required=True)
     enrich.add_argument("--plan-only", action="store_true")
     enrich.add_argument("--allow-model-call", action="store_true")
+    enrich.add_argument("--retry-failed", action="store_true", help="显式重试失败或中断时在途的任务")
     for name in ("preview", "validate", "confirm", "import", "retry"):
         command = sub.add_parser(name)
         command.add_argument("batch_dir", type=Path)
@@ -220,11 +221,13 @@ def main(argv: list[str] | None = None) -> int:
                                               args.source_contains, args.year), ensure_ascii=False, indent=2))
         elif args.command == "enrich-legacy":
             if args.plan_only:
-                print(json.dumps(plan_legacy_enrichment(args.source_batch, args.out, args.db),
+                print(json.dumps(plan_legacy_enrichment(args.source_batch, args.out, args.db,
+                                                        retry_failed=args.retry_failed),
                                  ensure_ascii=False, indent=2))
             else:
                 summary = run_legacy_enrichment(args.source_batch, args.out, args.db,
-                                                allow_model_call=args.allow_model_call)
+                                                allow_model_call=args.allow_model_call,
+                                                retry_failed=args.retry_failed)
                 review_sample(args.out)
                 print(json.dumps(summary, ensure_ascii=False, indent=2))
         elif args.command == "model-smoke":

@@ -213,6 +213,43 @@ class LegacyTests(unittest.TestCase):
         self.assertEqual(len(tasks.runs), 1)
         self.assertEqual(read_items(out)[0]["ai_answer"]["status"], "PENDING")
 
+    def test_truncated_answer_is_not_blindly_retried_on_resume(self):
+        source = self.root / "batch"
+        normalize(self.db, source, "ruc", "fixture", [2020])
+        out = self.root / "enriched"
+
+        class TruncatedTasks:
+            provider_id = "deepseek"
+            model = "deepseek-flash"
+
+            def __init__(self):
+                self.runs = []
+
+            def answer(self, stem):
+                self.runs.append({"task": "answer_generation", "provider": "deepseek", "model": self.model,
+                                  "duration_ms": 5, "attempts": 1, "input_tokens": 20,
+                                  "output_tokens": 4000, "estimated_cost": None, "currency": None,
+                                  "error": "OUTPUT_TRUNCATED"})
+                raise ModelError("answer_generation failed: OUTPUT_TRUNCATED")
+
+            def recommend(self, stem, topics):
+                self.runs.append({"task": "tag_recommendation", "provider": "deepseek", "model": self.model,
+                                  "duration_ms": 2, "attempts": 1, "input_tokens": 20,
+                                  "output_tokens": 10, "estimated_cost": None, "currency": None, "error": None})
+                return {"topic_id": "micro", "question_type": "简答题", "difficulty": 2}
+
+        first = TruncatedTasks()
+        with patch("api.bulk_import.enrich.make_tasks", return_value=first):
+            summary = run(source, out, self.db, allow_model_call=True)
+        self.assertEqual((summary["answer_failed"], summary["tag_success"]), (1, 1))
+        self.assertEqual(len(first.runs), 2)
+        self.assertEqual(plan(source, out, self.db)["answer_calls_pending"], 0)
+        second = TruncatedTasks()
+        with patch("api.bulk_import.enrich.make_tasks", return_value=second):
+            run(source, out, self.db, allow_model_call=True)
+        self.assertEqual(len(second.runs), 0)
+        self.assertEqual(plan(source, out, self.db, retry_failed=True)["answer_calls_pending"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

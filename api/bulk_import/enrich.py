@@ -23,7 +23,7 @@ from .storage import atomic_json, read_items, read_json, write_items
 ELIGIBLE_STATES = {"READY", "NORMALIZE_ONLY", "NEED_AI_ANSWER", "NEED_TAGGING"}
 BLOCKED_STATES = {"NEED_VISION", "NEED_SPLIT", "NEED_AI_SPLIT", "MANUAL_REVIEW",
                   "INCOMPLETE_SOURCE", "SECTION_HEADING_ONLY"}
-JSON_ERRORS = {"INVALID_STRUCTURED_RESPONSE", "OUTPUT_TRUNCATED"}
+JSON_RETRYABLE = {"INVALID_STRUCTURED_RESPONSE"}
 MODEL_NAME = "deepseek-flash"
 
 
@@ -92,7 +92,7 @@ def _create_output(source_batch: Path, out: Path, model: str, selected: list[dic
     _snapshot(out, selected)
 
 
-def plan(source_batch: Path, out: Path, db_path: Path) -> dict[str, Any]:
+def plan(source_batch: Path, out: Path, db_path: Path, *, retry_failed: bool = False) -> dict[str, Any]:
     if not db_path.is_file():
         raise FileNotFoundError("指定 SQLite 不存在")
     selected = _load_source(source_batch)
@@ -107,20 +107,26 @@ def plan(source_batch: Path, out: Path, db_path: Path) -> dict[str, Any]:
             raise ValueError("来源 JSONL 已变动；禁止沿用旧检查点")
         if manifest.get("provider") != "deepseek":
             raise ValueError("现有批次不是 DeepSeek")
-        pending_answer = pending_tag = 0
+        pending_answer = pending_tag = failed_answer = failed_tag = 0
         for item in selected:
             path = _item_path(out, item["item_key"])
             if not path.is_file():
                 raise ValueError("现有批次缺少检查点：" + item["item_key"])
             saved = read_json(path)
-            pending_answer += _task_state(saved, "answer_generation")["status"] != "SUCCEEDED"
-            pending_tag += _task_state(saved, "tag_recommendation")["status"] != "SUCCEEDED"
+            answer_status = _task_state(saved, "answer_generation")["status"]
+            tag_status = _task_state(saved, "tag_recommendation")["status"]
+            pending_answer += answer_status == "PENDING" or (retry_failed and answer_status != "SUCCEEDED")
+            pending_tag += tag_status == "PENDING" or (retry_failed and tag_status != "SUCCEEDED")
+            failed_answer += answer_status in {"ERROR", "RUNNING", "UNCERTAIN"}
+            failed_tag += tag_status in {"ERROR", "RUNNING", "UNCERTAIN"}
     else:
         pending_answer = sum(item["ai_answer"].get("status") != "SUCCEEDED" for item in selected)
         pending_tag = len(selected)
+        failed_answer = failed_tag = 0
     return {"source_total": len(read_items(source_batch)), "eligible": len(selected),
             "excluded": len(read_items(source_batch)) - len(selected),
             "answer_calls_pending": pending_answer, "tag_calls_pending": pending_tag,
+            "answer_failed_or_uncertain": failed_answer, "tag_failed_or_uncertain": failed_tag,
             "topic_counts": topic_counts, "provider": "deepseek", "model": MODEL_NAME,
             "input_digest": _source_digest(source_batch), "model_call": False}
 
@@ -156,9 +162,17 @@ def _warning(item: dict, message: str) -> None:
         warnings.append(message)
 
 
-def _run_task(item: dict, task_name: str, tasks, topics: list[dict], out: Path) -> bool:
+def _run_task(item: dict, task_name: str, tasks, topics: list[dict], out: Path,
+              *, retry_failed: bool = False) -> bool:
     state = _task_state(item, task_name)
     if state["status"] == "SUCCEEDED":
+        return False
+    if state["status"] == "RUNNING" and not retry_failed:
+        state.update({"status": "UNCERTAIN", "error": "INTERRUPTED_IN_FLIGHT"})
+        _warning(item, task_name + " 中断时正在调用；是否已计费不明，需显式 --retry-failed 才会重试")
+        atomic_json(_item_path(out, item["item_key"]), item)
+        return False
+    if state["status"] in {"ERROR", "UNCERTAIN"} and not retry_failed:
         return False
     for directed_retry in range(3):
         state["status"] = "RUNNING"
@@ -197,7 +211,7 @@ def _run_task(item: dict, task_name: str, tasks, topics: list[dict], out: Path) 
             return False
         if state["error"] in {"HTTP_401", "HTTP_403"}:
             return True
-        if state["error"] not in JSON_ERRORS or directed_retry == 2:
+        if state["error"] not in JSON_RETRYABLE or directed_retry == 2:
             return False
     return False
 
@@ -210,8 +224,9 @@ def _snapshot(out: Path, selected: list[dict]) -> list[dict]:
     return items
 
 
-def run(source_batch: Path, out: Path, db_path: Path, *, allow_model_call: bool = False) -> dict:
-    initial = plan(source_batch, out, db_path)
+def run(source_batch: Path, out: Path, db_path: Path, *, allow_model_call: bool = False,
+        retry_failed: bool = False) -> dict:
+    initial = plan(source_batch, out, db_path, retry_failed=retry_failed)
     if not allow_model_call:
         raise ModelError("真实批量调用需要 --allow-model-call")
     tasks = make_tasks("deepseek", True)
@@ -227,7 +242,7 @@ def run(source_batch: Path, out: Path, db_path: Path, *, allow_model_call: bool 
         target_topics = topics_by_target[item["exam_scope"]["target_id"]]
         halted = False
         for task_name in ("answer_generation", "tag_recommendation"):
-            halted = _run_task(item, task_name, tasks, target_topics, out)
+            halted = _run_task(item, task_name, tasks, target_topics, out, retry_failed=retry_failed)
             if halted:
                 break
         _snapshot(out, selected)
@@ -253,12 +268,12 @@ def summarize(out: Path) -> dict:
     fingerprints = Counter(stem_fingerprint(item["content"]["stem_latex"]) for item in items)
     def json_retries(item: dict, task: str) -> int:
         task_runs = [run for run in item["processing_meta"].get("model_runs", []) if run.get("task") == task]
-        return sum(run.get("error") in JSON_ERRORS for run in task_runs[:-1])
+        return sum(run.get("error") in JSON_RETRYABLE for run in task_runs[:-1])
     summary = {
         "eligible": len(items), "answer_success": sum(a == "SUCCEEDED" for a, _ in states),
-        "answer_failed": sum(a == "ERROR" for a, _ in states),
+        "answer_failed": sum(a in {"ERROR", "UNCERTAIN"} for a, _ in states),
         "tag_success": sum(t == "SUCCEEDED" for _, t in states),
-        "tag_failed": sum(t == "ERROR" for _, t in states),
+        "tag_failed": sum(t in {"ERROR", "UNCERTAIN"} for _, t in states),
         "topic_null": sum(item["classification"]["topic_id"] is None for item in items),
         "question_type_null": sum(item["classification"]["question_type"] is None for item in items),
         "difficulty_null": sum(item["classification"]["difficulty"] is None for item in items),
