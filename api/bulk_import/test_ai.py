@@ -62,8 +62,7 @@ class TextProviderTests(unittest.TestCase):
                     self.assertEqual(request.full_url, url)
                     self.assertEqual(json.loads(request.data)["model"], "fixture-model")
                     self.assertEqual(json.loads(request.data)["max_tokens"], 4000)
-                    if provider == "deepseek":
-                        self.assertEqual(json.loads(request.data)["response_format"], {"type": "json_object"})
+                    self.assertEqual(json.loads(request.data)["response_format"], {"type": "json_object"})
                     run = tasks.runs[-1]
                     self.assertEqual(run["provider"], provider_id)
                     self.assertEqual(run["task"], "answer_generation")

@@ -77,7 +77,7 @@ python -m api.bulk_import.cli normalize-legacy --db 'C:\platform\platform.db' --
 
 超时默认 30 秒；额外重试默认 2 次、最多 3 次，仅对 429、暂时性 5xx 与网络/超时错误重试；401/403 和 JSON 格式错误不重试。Base URL 必须为 HTTPS。两家费用估算均只使用运营者另行配置的 `{前缀}_INPUT_PRICE_PER_MILLION`、`{前缀}_OUTPUT_PRICE_PER_MILLION`、`{前缀}_PRICE_CURRENCY`（前缀分别为 `DOUBAO_ARK` 和 `DEEPSEEK`）；费率或 usage 缺失时 `estimated_cost=null`，不得当成免费。`processing_meta.model_runs` 统一记录 task、provider、model、tokens、duration_ms、attempts、estimated_cost、currency、脱敏 error。密钥仅从后端环境变量读取，不进入前端、JSONL、数据库、日志或 Git。
 
-首轮文字 Pilot 中三次长答案均在旧的 2,000 输出 Token 上限处返回无效 JSON。现在两家共用的答案上限为 4,000，标签任务仍为 2,000；Prompt 和题干不因 Provider 改动。若 API 明确返回 `finish_reason=length`，记录 `OUTPUT_TRUNCATED`，不盲目重复调用。已生成的成功结果不应为此重跑。
+首轮文字 Pilot 中三次长答案均在旧的 2,000 输出 Token 上限处返回无效 JSON。现在两家共用的答案上限为 4,000，标签任务仍为 2,000；Prompt 和题干不因 Provider 改动。两家文本请求均显式发送 `response_format={"type":"json_object"}`，减少仅靠 Prompt 约束导致的格式错误。若 API 明确返回 `finish_reason=length`，记录 `OUTPUT_TRUNCATED`，不盲目重复调用。已生成的成功结果不应为此重跑。真实试验观察到豆包某些文本调用超过默认 30 秒；试验时可单独配置超时，不能把超时或无效 JSON 当成正确答案。
 
 PowerShell 仅在本机当前会话设置，下面占位内容须由管理员在本机替换，不要发到聊天或提交：
 
@@ -88,7 +88,7 @@ $env:DEEPSEEK_API_KEY = '在本机填入 DeepSeek 密钥'
 $env:DEEPSEEK_MODEL = '在本机填入已开通的 DeepSeek 模型 ID'
 ```
 
-连接 Smoke Test 仅发送一条通用、无版权的需求曲线问题，不读取 PDF，不写数据库；输出 JSON 格式检查与调用元数据，不打印答案正文。**本轮未实际执行以下付费命令**，须待 Product Owner 明确批准后使用：
+连接 Smoke Test 仅发送一条通用、无版权的需求曲线问题，不读取 PDF，不写数据库；输出 JSON 格式检查与调用元数据，不打印答案正文。以下付费命令仅在 Product Owner 明确批准后使用；本地历史 Smoke Test 成功不代表后续配置与网络仍然可用：
 
 ```powershell
 python -m api.bulk_import.cli model-smoke --provider doubao --allow-model-call

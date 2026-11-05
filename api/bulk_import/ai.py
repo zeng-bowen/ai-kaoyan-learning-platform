@@ -214,7 +214,7 @@ class DoubaoTasks(_TextTasks):
     """Ark text tasks and the existing configured RecognitionProvider for vision."""
 
     def __init__(self):
-        super().__init__("DOUBAO_ARK", "doubao-ark", "https://ark.cn-beijing.volces.com/api/v3")
+        super().__init__("DOUBAO_ARK", "doubao-ark", "https://ark.cn-beijing.volces.com/api/v3", json_mode=True)
 
 
 class DeepSeekTasks(_TextTasks):
