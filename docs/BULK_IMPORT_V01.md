@@ -6,7 +6,7 @@
 
 - Python 3.11+；安装 `api/requirements.txt`，其中 PDF 提取和页面渲染依赖 `pdfplumber`。通过仓库根目录运行 `python -m api.bulk_import.cli ...`。
 - 输入仅支持 PDF。可复制文本优先本地提取；仅扫描/文字极少的页面才经既有视觉 Provider 识别。复杂公式、图片表格、答案标题变体无法保证自动识别正确；本地规则转换的公式及按纵向位置关联的图表会警告。
-- `--provider doubao` 是默认选项；可选 `none`、`mock`、`doubao`、`deepseek`。**没有** `--allow-model-call` 时真实 Provider 只生成 `PENDING`，绝不发送资料或伪造答案。`--provider mock` 用于演练，生成的 `MOCK` 答案不能入库。真实题目调用前必须得到资料外发与费用许可。
+- `prepare` 默认 `--provider doubao`，用于现有视觉/拆题能力；纯文本 `retry` 默认 `--provider deepseek`，历史批量文字增强固定使用 DeepSeek。可选 `none`、`mock`、`doubao`、`deepseek`。**没有** `--allow-model-call` 时真实 Provider 只生成 `PENDING`，绝不发送资料或伪造答案。`--provider mock` 用于演练，生成的 `MOCK` 答案不能入库。真实题目调用前必须得到资料外发与费用许可。
 - 真题须有来源名称、原 PDF、SHA-256、页码、年份和考试标签；`source_url` 可空，空值只提示 Warning，填写时须为有效 HTTPS URL。不得为了绕过校验将真题改标成原创资料。
 - 不提交原 PDF、题图、`manifest.json`、`questions.jsonl`、`progress.json`、数据库或密钥。输出目录应放在仓库外，或保持在忽略目录内。不要将此本地管理员工具或演示版管理员 API 暴露到公网。
 
@@ -25,7 +25,7 @@ python -m api.bulk_import.cli validate 'C:\batches\econ-001' --db 'C:\platform\p
 获许可并配置模型后，可仅重试指定题目的 AI 答案和缺失标签推荐：
 
 ```powershell
-python -m api.bulk_import.cli retry 'C:\batches\econ-001' --item-key '实际item_key' --db 'C:\platform\platform.db' --provider doubao --allow-model-call
+python -m api.bulk_import.cli retry 'C:\batches\econ-001' --item-key '实际item_key' --db 'C:\platform\platform.db' --provider deepseek --allow-model-call
 python -m api.bulk_import.cli validate 'C:\batches\econ-001' --db 'C:\platform\platform.db'
 python -m api.bulk_import.cli preview 'C:\batches\econ-001'
 python -m api.bulk_import.cli confirm 'C:\batches\econ-001' --item-key '实际item_key'
@@ -48,6 +48,19 @@ python -m api.bulk_import.cli normalize-legacy --db 'C:\platform\platform.db' --
 历史资料的 `answer` 只映射为 `REFERENCE`，即使其 `analysis` 与 `answer` 相同也绝不当成独立 AI 答案或官方答案。AI 一律 `PENDING`；历史难度不论数值均清空待重新评估；题型只允许名词解释、选择/填空、简答题、论述题、计算题，未知值留空。`processing_meta.legacy_status` 记录七类初筛；`legacy_gate=BLOCKED` 的拆题、视觉、原件缺失候选不得直接重试模型或入库。已找到题目节标题但答案边界不可靠的记录保留 `NEED_AI_SPLIT`，不自动把来源答案分派给新题。局部裁剪未经过语义核验，视觉题的文本答案适配器仍禁止运行。
 
 `pilot-manifest.json` 仅保存组别与候选定位，`pilot.jsonl` 为 8 条文本、5 条视觉、3 条反例的标准单题快照，不代表已经真实调用或通过审核。后续须人工对照 PDF，按需选择极少量题进行模型试验；未经 Product Owner 明确批准，不执行带 `--allow-model-call` 的命令，也不执行 `import`。人工修改 JSON 后运行同一 `validate`；只有处理门槛、独立 AI 答案、主知识点、固定题型和已评估难度满足校验，且逐题确认后才可能入 DRAFT。
+
+### 历史候选的纯文本增强（独立输出，不入库）
+
+人大 834 八题 A/B Pilot 后，Product Owner 指定纯文本答案和标签默认采用 `deepseek-flash`。以下入口只接受已有 `normalize-legacy` 的批次，读取历史 SQLite 中当前考试标签绑定的知识点；不再解析整份 PDF，不调用视觉、拆题或豆包文本任务。先执行无模型调用的预检，再由已获批的管理员显式开启真实调用：
+
+```powershell
+python -m api.bulk_import.cli enrich-legacy --source-batch 'C:\batches\legacy-834-001' --out 'C:\batches\legacy-834-text-001' --db 'C:\platform\platform.db' --plan-only
+python -m api.bulk_import.cli enrich-legacy --source-batch 'C:\batches\legacy-834-001' --out 'C:\batches\legacy-834-text-001' --db 'C:\platform\platform.db' --allow-model-call
+```
+
+实际调用前须在后端环境配置 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL=deepseek-flash`。一次仅运行一个进程，串行处理；每题答案与标签分别保存检查点，成功项续跑时不会再调用。无效 JSON/截断结果最多定向重试两次，HTTP 401/403 停止批次，429/暂时性 5xx/超时使用适配器已有的有限重试。中断后用同一命令、同一输出目录续跑；不要更换输入 JSONL 或模型。刚发出但尚未来得及保存结果的在途请求无法提供严格的外部 exactly-once 保证，续跑前应核对最后一题的检查点。
+
+增强输出包括 `manifest.json`、`items/<item_key>.json`、`questions.jsonl`、`progress.json`、完成后的 `summary.json` 和 `review-sample.json`。所有结果保留来源答案和历史标签快照；AI 答案只写 `ai_answer`，标签结果只写 `classification`，历史 SQLite 始终只读。`ANSWER_CONFLICT` 是保守的数值结果不一致候选警告，不代表模型或来源谁正确；未能自动比对的答案应进入人工核验范围。抽检清单不含完整长答案，人工审查须对照单题检查点和来源 PDF。输出目录须保持 Git 忽略，不得直接把增强批次当作已审核正式题库。
 
 ## 批次格式与字段映射
 

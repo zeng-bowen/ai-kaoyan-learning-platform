@@ -8,9 +8,12 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from api.bulk_import.cli import retry_item
+from api.bulk_import.ai import ModelError
 from api.bulk_import.legacy import _split_attempt, _text, _type, audit, normalize
+from api.bulk_import.enrich import _answer_comparison, plan, review_sample, run
 from api.bulk_import.storage import read_items
 
 
@@ -29,7 +32,8 @@ class LegacyTests(unittest.TestCase):
         try:
             con.executescript("""
                 CREATE TABLE targets(id TEXT PRIMARY KEY,school TEXT,exam_label TEXT);
-                CREATE TABLE topics(id TEXT PRIMARY KEY,name TEXT);
+                CREATE TABLE questions(id TEXT PRIMARY KEY);
+                CREATE TABLE topics(id TEXT PRIMARY KEY,name TEXT,subject TEXT,module TEXT);
                 CREATE TABLE topic_target_tags(topic_id TEXT,target_id TEXT);
                 CREATE TABLE pdf_imports(id TEXT PRIMARY KEY,target_id TEXT,original_name TEXT,
                     stored_name TEXT,sha256 TEXT,page_count INTEGER);
@@ -38,7 +42,7 @@ class LegacyTests(unittest.TestCase):
                     analysis TEXT,topic_id TEXT,question_type TEXT,difficulty INTEGER,
                     stem_segments_json TEXT,answer_segments_json TEXT);
                 INSERT INTO targets VALUES ('ruc','中国人民大学','834 经济学');
-                INSERT INTO topics VALUES ('micro','需求弹性');
+                INSERT INTO topics VALUES ('micro','需求弹性','微观经济学','消费者理论');
                 INSERT INTO topic_target_tags VALUES ('micro','ruc');
             """)
             con.execute("INSERT INTO pdf_imports VALUES (?,?,?,?,?,?)",
@@ -89,6 +93,125 @@ class LegacyTests(unittest.TestCase):
         self.assertIsNone(_type("图形分析题"))
         self.assertEqual(_split_attempt({"stem": "1.题目\n二、计算题\n求解", "answer": ""})["result"],
                          "NEED_AI_SPLIT")
+
+    def test_text_enrichment_is_resumable_and_never_writes_source_db(self):
+        source = self.root / "batch"
+        normalize(self.db, source, "ruc", "fixture", [2020])
+        before_db = hashlib.sha256(self.db.read_bytes()).hexdigest()
+        before_jsonl = hashlib.sha256((source / "questions.jsonl").read_bytes()).hexdigest()
+        out = self.root / "enriched"
+        self.assertEqual(plan(source, out, self.db)["eligible"], 1)
+        self.assertEqual(plan(source, out, self.db)["answer_calls_pending"], 1)
+        self.assertEqual(plan(source, out, self.db)["tag_calls_pending"], 1)
+
+        class FakeTasks:
+            provider_id = "deepseek"
+            model = "deepseek-flash"
+
+            def __init__(self):
+                self.runs = []
+
+            def answer(self, stem):
+                self.runs.append({"task": "answer_generation", "provider": "deepseek", "model": self.model,
+                                  "duration_ms": 10, "attempts": 1, "input_tokens": 10, "output_tokens": 20,
+                                  "estimated_cost": None, "currency": None, "error": None})
+                return {"answer": "需求弹性是相对变动之比", "analysis": "按定义计算"}
+
+            def recommend(self, stem, topics):
+                self.runs.append({"task": "tag_recommendation", "provider": "deepseek", "model": self.model,
+                                  "duration_ms": 5, "attempts": 1, "input_tokens": 20, "output_tokens": 10,
+                                  "estimated_cost": None, "currency": None, "error": None})
+                return {"topic_id": "micro", "question_type": "简答题", "difficulty": 2}
+
+        first = FakeTasks()
+        with patch("api.bulk_import.enrich.make_tasks", return_value=first):
+            summary = run(source, out, self.db, allow_model_call=True)
+        self.assertEqual((summary["eligible"], summary["answer_success"], summary["tag_success"]), (1, 1, 1))
+        self.assertEqual(len(first.runs), 2)
+        enriched = read_items(out)[0]
+        self.assertEqual(enriched["source_answer"]["text"], "来源参考答案")
+        self.assertEqual(enriched["ai_answer"]["provider"], "deepseek")
+        self.assertEqual(enriched["classification"]["difficulty"], 2)
+        self.assertEqual(plan(source, out, self.db)["answer_calls_pending"], 0)
+        second = FakeTasks()
+        with patch("api.bulk_import.enrich.make_tasks", return_value=second):
+            run(source, out, self.db, allow_model_call=True)
+        self.assertEqual(len(second.runs), 0)
+        self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before_db)
+        self.assertEqual(hashlib.sha256((source / "questions.jsonl").read_bytes()).hexdigest(), before_jsonl)
+        self.assertEqual(len(review_sample(out)), 1)
+
+    def test_conflict_is_warning_candidate_not_automatic_truth(self):
+        item = {"source_answer": {"text": "最终 X=18，Y=10"},
+                "ai_answer": {"answer": "由约束求得 X=24，Y=13"}}
+        self.assertEqual(_answer_comparison(item), "POTENTIAL_CONFLICT")
+        item["ai_answer"]["answer"] = "由约束求得 X=18，Y=10"
+        self.assertEqual(_answer_comparison(item), "NUMERIC_AGREEMENT")
+
+    def test_invalid_json_is_retried_once_and_checkpointed(self):
+        source = self.root / "batch"
+        normalize(self.db, source, "ruc", "fixture", [2020])
+        out = self.root / "enriched"
+
+        class RetryTasks:
+            provider_id = "deepseek"
+            model = "deepseek-flash"
+
+            def __init__(self):
+                self.runs = []
+
+            def answer(self, stem):
+                error = "INVALID_STRUCTURED_RESPONSE" if not self.runs else None
+                self.runs.append({"task": "answer_generation", "provider": "deepseek", "model": self.model,
+                                  "duration_ms": 4, "attempts": 1, "input_tokens": 10, "output_tokens": 5,
+                                  "estimated_cost": None, "currency": None, "error": error})
+                if error:
+                    raise ModelError("answer_generation failed: " + error)
+                return {"answer": "合格答案", "analysis": "合格解析"}
+
+            def recommend(self, stem, topics):
+                self.runs.append({"task": "tag_recommendation", "provider": "deepseek", "model": self.model,
+                                  "duration_ms": 3, "attempts": 1, "input_tokens": 15, "output_tokens": 4,
+                                  "estimated_cost": None, "currency": None, "error": None})
+                return {"topic_id": None, "question_type": None, "difficulty": None}
+
+        tasks = RetryTasks()
+        with patch("api.bulk_import.enrich.make_tasks", return_value=tasks):
+            summary = run(source, out, self.db, allow_model_call=True)
+        self.assertEqual(summary["answer_json_retries"], 1)
+        self.assertEqual(summary["tag_success"], 1)
+        self.assertEqual(summary["topic_null"], 1)
+        self.assertEqual(len(tasks.runs), 3)
+        self.assertEqual(read_items(out)[0]["ai_answer"]["status"], "SUCCEEDED")
+
+    def test_auth_failure_stops_without_tag_call(self):
+        source = self.root / "batch"
+        normalize(self.db, source, "ruc", "fixture", [2020])
+        out = self.root / "enriched"
+
+        class AuthTasks:
+            provider_id = "deepseek"
+            model = "deepseek-flash"
+
+            def __init__(self):
+                self.runs = []
+
+            def answer(self, stem):
+                self.runs.append({"task": "answer_generation", "provider": "deepseek", "model": self.model,
+                                  "duration_ms": 1, "attempts": 1, "input_tokens": None,
+                                  "output_tokens": None, "estimated_cost": None, "currency": None,
+                                  "error": "HTTP_401"})
+                raise ModelError("answer_generation failed: HTTP_401")
+
+            def recommend(self, stem, topics):
+                self.fail("tag must not be called")
+
+        tasks = AuthTasks()
+        with patch("api.bulk_import.enrich.make_tasks", return_value=tasks):
+            with self.assertRaisesRegex(ModelError, "401/403"):
+                run(source, out, self.db, allow_model_call=True)
+        self.assertEqual(len(tasks.runs), 1)
+        self.assertEqual(read_items(out)[0]["ai_answer"]["status"], "PENDING")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from pathlib import Path
 from .ai import ModelError, make_tasks
 from .contract import canonical_digest, sha256_file, stem_fingerprint, validate_item
 from .db import connect_existing, import_one, list_topics
+from .enrich import plan as plan_legacy_enrichment, review_sample, run as run_legacy_enrichment
 from .legacy import audit as audit_legacy, normalize as normalize_legacy
 from .pipeline import prepare
 from .storage import atomic_json, read_items, read_json, write_items
@@ -190,6 +191,12 @@ def main(argv: list[str] | None = None) -> int:
         legacy.add_argument("--year", type=int, action="append")
         if name == "normalize-legacy":
             legacy.add_argument("--out", type=Path, required=True)
+    enrich = sub.add_parser("enrich-legacy", help="DeepSeek 文本增强历史候选；逐题本地检查点，不写 SQLite")
+    enrich.add_argument("--source-batch", type=Path, required=True)
+    enrich.add_argument("--out", type=Path, required=True)
+    enrich.add_argument("--db", type=Path, required=True)
+    enrich.add_argument("--plan-only", action="store_true")
+    enrich.add_argument("--allow-model-call", action="store_true")
     for name in ("preview", "validate", "confirm", "import", "retry"):
         command = sub.add_parser(name)
         command.add_argument("batch_dir", type=Path)
@@ -199,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--item-key", required=True)
         if name == "retry":
             command.add_argument("--db", type=Path)
-            command.add_argument("--provider", choices=["none", "mock", "doubao", "deepseek"], default="doubao")
+            command.add_argument("--provider", choices=["none", "mock", "doubao", "deepseek"], default="deepseek")
             command.add_argument("--allow-model-call", action="store_true")
     smoke = sub.add_parser("model-smoke", help="极短通用题验证文本模型连接；真实调用必须显式授权")
     smoke.add_argument("--provider", choices=["mock", "doubao", "deepseek"], required=True)
@@ -211,6 +218,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "normalize-legacy":
             print(json.dumps(normalize_legacy(args.db, args.out, args.target_id,
                                               args.source_contains, args.year), ensure_ascii=False, indent=2))
+        elif args.command == "enrich-legacy":
+            if args.plan_only:
+                print(json.dumps(plan_legacy_enrichment(args.source_batch, args.out, args.db),
+                                 ensure_ascii=False, indent=2))
+            else:
+                summary = run_legacy_enrichment(args.source_batch, args.out, args.db,
+                                                allow_model_call=args.allow_model_call)
+                review_sample(args.out)
+                print(json.dumps(summary, ensure_ascii=False, indent=2))
         elif args.command == "model-smoke":
             if args.provider != "mock" and not args.allow_model_call:
                 raise ModelError("真实连接测试需要 --allow-model-call；本轮未经批准请勿使用")
