@@ -13,8 +13,8 @@ from unittest.mock import patch
 from api.bulk_import.cli import retry_item
 from api.bulk_import.ai import ModelError
 from api.bulk_import.legacy import _split_attempt, _text, _type, audit, normalize
-from api.bulk_import.enrich import _answer_comparison, plan, review_sample, run
-from api.bulk_import.storage import read_items
+from api.bulk_import.enrich import _answer_comparison, plan, review_sample, run, summarize
+from api.bulk_import.storage import atomic_json, read_items, write_items
 
 
 class LegacyTests(unittest.TestCase):
@@ -140,6 +140,13 @@ class LegacyTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before_db)
         self.assertEqual(hashlib.sha256((source / "questions.jsonl").read_bytes()).hexdigest(), before_jsonl)
         self.assertEqual(len(review_sample(out)), 1)
+        duplicate = json.loads(json.dumps(enriched))
+        duplicate["item_key"] = "legacy-fixture-duplicate"
+        atomic_json(out / "items" / (duplicate["item_key"] + ".json"), duplicate)
+        write_items(out, [enriched, duplicate])
+        duplicate_summary = summarize(out)
+        self.assertEqual((duplicate_summary["duplicate_groups"], duplicate_summary["duplicate_members"]), (1, 2))
+        self.assertTrue(all(item["validation"]["duplicate_candidates"] for item in read_items(out)))
 
     def test_conflict_is_warning_candidate_not_automatic_truth(self):
         item = {"source_answer": {"text": "最终 X=18，Y=10"},

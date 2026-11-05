@@ -258,6 +258,18 @@ def run(source_batch: Path, out: Path, db_path: Path, *, allow_model_call: bool 
 
 def summarize(out: Path) -> dict:
     items = read_items(out)
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for item in items:
+        grouped[stem_fingerprint(item["content"]["stem_latex"])].append(item)
+    for group in grouped.values():
+        if len(group) < 2:
+            continue
+        for item in group:
+            others = [other["item_key"] for other in group if other["item_key"] != item["item_key"]]
+            item["validation"]["duplicate_candidates"] = others
+            _warning(item, "疑似本批重复题：" + ", ".join(others))
+            atomic_json(_item_path(out, item["item_key"]), item)
+    write_items(out, items)
     runs = [run for item in items for run in item["processing_meta"].get("model_runs", [])]
     success = [run for run in runs if not run.get("error")]
     answers = [run for run in success if run["task"] == "answer_generation"]
@@ -265,7 +277,7 @@ def summarize(out: Path) -> dict:
     states = [(item["processing_meta"]["enrichment"]["answer_generation"]["status"],
                item["processing_meta"]["enrichment"]["tag_recommendation"]["status"]) for item in items]
     errors = Counter(run.get("error") for run in runs if run.get("error"))
-    fingerprints = Counter(stem_fingerprint(item["content"]["stem_latex"]) for item in items)
+    fingerprints = Counter({fingerprint: len(group) for fingerprint, group in grouped.items()})
     def json_retries(item: dict, task: str) -> int:
         task_runs = [run for run in item["processing_meta"].get("model_runs", []) if run.get("task") == task]
         return sum(run.get("error") in JSON_RETRYABLE for run in task_runs[:-1])

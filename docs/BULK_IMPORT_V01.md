@@ -56,11 +56,12 @@ python -m api.bulk_import.cli normalize-legacy --db 'C:\platform\platform.db' --
 ```powershell
 python -m api.bulk_import.cli enrich-legacy --source-batch 'C:\batches\legacy-834-001' --out 'C:\batches\legacy-834-text-001' --db 'C:\platform\platform.db' --plan-only
 python -m api.bulk_import.cli enrich-legacy --source-batch 'C:\batches\legacy-834-001' --out 'C:\batches\legacy-834-text-001' --db 'C:\platform\platform.db' --allow-model-call
+python -m api.bulk_import.cli report-legacy-enrichment 'C:\batches\legacy-834-text-001'
 ```
 
 实际调用前须在后端环境配置 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL=deepseek-flash`。一次仅运行一个进程，串行处理；每题答案与标签分别保存检查点，成功项续跑时不会再调用。无效 JSON 最多定向重试两次；明确 `OUTPUT_TRUNCATED` 不重复发送同样请求。HTTP 401/403 停止批次，429/暂时性 5xx/超时使用适配器已有的有限重试。中断后用同一命令、同一输出目录续跑；不要更换输入 JSONL 或模型。失败与中断时在途的任务默认不再自动重试；核对后方可显式加 `--retry-failed`。刚发出但尚未来得及保存结果的在途请求无法提供严格的外部 exactly-once 保证。
 
-增强输出包括 `manifest.json`、`items/<item_key>.json`、`questions.jsonl`、`progress.json`、完成后的 `summary.json` 和 `review-sample.json`。所有结果保留来源答案和历史标签快照；AI 答案只写 `ai_answer`，标签结果只写 `classification`，历史 SQLite 始终只读。`ANSWER_CONFLICT` 是保守的数值结果不一致候选警告，不代表模型或来源谁正确；未能自动比对的答案应进入人工核验范围。抽检清单不含完整长答案，人工审查须对照单题检查点和来源 PDF。输出目录须保持 Git 忽略，不得直接把增强批次当作已审核正式题库。
+增强输出包括 `manifest.json`、`items/<item_key>.json`、`questions.jsonl`、`progress.json`、完成后的 `summary.json` 和 `review-sample.json`。最后一个命令仅从本地结果重建统计、重复题 Warning 和约 30 题抽检清单，不发模型请求。所有结果保留来源答案和历史标签快照；AI 答案只写 `ai_answer`，标签结果只写 `classification`，历史 SQLite 始终只读。`ANSWER_CONFLICT` 是保守的数值结果不一致候选警告，不代表模型或来源谁正确；未能自动比对的答案应进入人工核验范围。抽检清单不含完整长答案，人工审查须对照单题检查点和来源 PDF。输出目录须保持 Git 忽略，不得直接把增强批次当作已审核正式题库。
 
 ## 批次格式与字段映射
 
