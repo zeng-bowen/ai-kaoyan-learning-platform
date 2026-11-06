@@ -18,6 +18,16 @@ def atomic_json(path: Path, value: Any) -> None:
     temp.replace(path)
 
 
+def atomic_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    with temp.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(value)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temp.replace(path)
+
+
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 

@@ -56,6 +56,19 @@ class TextProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(ModelError, "ANSWER_MAX_TOKENS"):
                 DeepSeekTasks()
 
+    def test_compact_answer_uses_same_contract_without_source_answer(self):
+        env = {"DEEPSEEK_API_KEY": "fixture-secret", "DEEPSEEK_MODEL": "fixture-model"}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen",
+                return_value=FakeResponse('{"answer":"结论","analysis":"必要推导"}')) as send:
+            tasks = DeepSeekTasks()
+            self.assertEqual(tasks.answer_compact("测试题干"),
+                             {"answer": "结论", "analysis": "必要推导"})
+            prompt = json.loads(send.call_args.args[0].data)["messages"][0]["content"]
+            self.assertIn("经济学考研作答风格", prompt)
+            self.assertIn("必要公式和推导", prompt)
+            self.assertIn("测试题干", prompt)
+            self.assertNotIn("来源参考答案", prompt)
+
     def test_default_gate_never_reads_credentials_or_calls_http(self):
         with patch.dict(os.environ, {}, clear=True), patch("urllib.request.urlopen") as send:
             self.assertEqual(make_tasks("doubao").__class__.__name__, "DisabledTasks")

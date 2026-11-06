@@ -12,7 +12,7 @@ from pathlib import Path
 from .ai import ModelError, make_tasks
 from .contract import canonical_digest, sha256_file, stem_fingerprint, validate_item
 from .db import connect_existing, import_one, list_topics
-from .enrich import plan as plan_legacy_enrichment, review_sample, run as run_legacy_enrichment, summarize
+from .enrich import plan as plan_legacy_enrichment, review_pack, review_sample, run as run_legacy_enrichment, summarize
 from .legacy import audit as audit_legacy, normalize as normalize_legacy
 from .pipeline import prepare
 from .storage import atomic_json, read_items, read_json, write_items
@@ -199,10 +199,12 @@ def main(argv: list[str] | None = None) -> int:
     enrich.add_argument("--allow-model-call", action="store_true")
     enrich.add_argument("--retry-failed", action="store_true", help="显式重试失败或中断时在途的任务")
     enrich.add_argument("--retry-error", action="append", choices=["OUTPUT_TRUNCATED", "INVALID_STRUCTURED_RESPONSE",
-                                                            "NETWORK_OR_TIMEOUT", "HTTP_429", "HTTP_500",
+                                                            "INTERRUPTED_IN_FLIGHT", "NETWORK_OR_TIMEOUT", "HTTP_429", "HTTP_500",
                                                             "HTTP_502", "HTTP_503", "HTTP_504"])
     report = sub.add_parser("report-legacy-enrichment", help="仅从本地检查点重建统计和人工抽检清单")
     report.add_argument("batch_dir", type=Path)
+    review = sub.add_parser("review-legacy-enrichment", help="从既有抽检名单生成完整题干、答案和标签的人工 Review 文件")
+    review.add_argument("batch_dir", type=Path)
     for name in ("preview", "validate", "confirm", "import", "retry"):
         command = sub.add_parser(name)
         command.add_argument("batch_dir", type=Path)
@@ -238,13 +240,17 @@ def main(argv: list[str] | None = None) -> int:
                                                 allow_model_call=args.allow_model_call,
                                                 retry_failed=args.retry_failed,
                                                 retry_errors=retry_errors)
-                review_sample(args.out)
+                if not (args.out / "review-sample.json").exists():
+                    review_sample(args.out)
                 print(json.dumps(summary, ensure_ascii=False, indent=2))
         elif args.command == "report-legacy-enrichment":
             summary = summarize(args.batch_dir)
-            sample = review_sample(args.batch_dir)
+            sample = (read_json(args.batch_dir / "review-sample.json")["items"]
+                      if (args.batch_dir / "review-sample.json").exists() else review_sample(args.batch_dir))
             print(json.dumps({"summary": summary, "review_sample_count": len(sample)},
                              ensure_ascii=False, indent=2))
+        elif args.command == "review-legacy-enrichment":
+            print(review_pack(args.batch_dir))
         elif args.command == "model-smoke":
             if args.provider != "mock" and not args.allow_model_call:
                 raise ModelError("真实连接测试需要 --allow-model-call；本轮未经批准请勿使用")

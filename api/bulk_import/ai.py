@@ -179,11 +179,21 @@ class _TextTasks:
             raise ModelError("structure result missing questions")
         return [q for q in questions if isinstance(q, dict) and isinstance(q.get("stem"), str) and q["stem"].strip()]
 
-    def answer(self, stem: str) -> dict[str, str]:
+    def _answer(self, stem: str, *, concise: bool) -> dict[str, str]:
+        style = ("按经济学考研作答风格精简回答：保留最终结论、核心原理、必要公式和推导；"
+                 "逐一回答小问，不作教材式长篇扩展，不省略影响结论的条件。") if concise else ""
         prompt = ("你是初级和中级宏微观经济学解题助手，参考高鸿业、曼昆、布兰查德、平新乔、范里安、尼克尔森的通行理论。"
-                  "仅输出 JSON 对象 {\"answer\":\"...\",\"analysis\":\"...\"}。不确定时明确写出不确定性，不冒充官方答案。\n题目：" + stem[:16000])
+                  "仅输出 JSON 对象 {\"answer\":\"...\",\"analysis\":\"...\"}。不确定时明确写出不确定性，不冒充官方答案。"
+                  + style + "\n题目：" + stem[:16000])
         result = self._call("answer_generation", prompt)
         return {"answer": result["answer"].strip(), "analysis": result["analysis"].strip()}
+
+    def answer(self, stem: str) -> dict[str, str]:
+        return self._answer(stem, concise=False)
+
+    def answer_compact(self, stem: str) -> dict[str, str]:
+        """Targeted retry for a previously truncated answer; never changes the source answer."""
+        return self._answer(stem, concise=True)
 
     def recommend(self, stem: str, topics: list[dict[str, str]]) -> dict[str, Any]:
         prompt = ("从给定知识点中推荐且只推荐一个最匹配 ID，一次返回 topic_id、question_type、difficulty。"

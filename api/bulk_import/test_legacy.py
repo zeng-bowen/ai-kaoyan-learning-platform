@@ -13,7 +13,8 @@ from unittest.mock import patch
 from api.bulk_import.cli import retry_item
 from api.bulk_import.ai import ModelError
 from api.bulk_import.legacy import _split_attempt, _text, _type, audit, normalize
-from api.bulk_import.enrich import _answer_comparison, plan, review_sample, run, summarize
+from api.bulk_import.enrich import (_answer_comparison, _create_output, _load_source,
+                                    plan, review_pack, review_sample, run, summarize)
 from api.bulk_import.storage import atomic_json, read_items, write_items
 
 
@@ -262,6 +263,79 @@ class LegacyTests(unittest.TestCase):
                               retry_errors={"INVALID_STRUCTURED_RESPONSE"})["answer_calls_pending"], 0)
         self.assertEqual(plan(source, out, self.db, retry_failed=True,
                               retry_errors={"OUTPUT_TRUNCATED"})["answer_calls_pending"], 1)
+
+    def test_only_failed_answer_retries_with_compact_style_and_no_tag_call(self):
+        source = self.root / "batch"
+        normalize(self.db, source, "ruc", "fixture", [2020])
+        selected = _load_source(source)
+
+        class RetryOnlyTasks:
+            provider_id = "deepseek"
+            model = "deepseek-flash"
+
+            def __init__(self):
+                self.runs = []
+                self.styles = []
+
+            def answer(self, stem):
+                self.styles.append("STANDARD")
+                return self._record()
+
+            def answer_compact(self, stem):
+                self.styles.append("EXAM_CONCISE")
+                return self._record()
+
+            def _record(self):
+                self.runs.append({"task": "answer_generation", "provider": "deepseek", "model": self.model,
+                                  "duration_ms": 1, "attempts": 1, "input_tokens": 5,
+                                  "output_tokens": 5, "estimated_cost": None, "currency": None, "error": None})
+                return {"answer": "结论", "analysis": "推导"}
+
+            def recommend(self, stem, topics):
+                raise AssertionError("successful tags must not be called")
+
+        for error, expected_style in (("OUTPUT_TRUNCATED", "EXAM_CONCISE"),
+                                      ("INTERRUPTED_IN_FLIGHT", "STANDARD")):
+            with self.subTest(error=error):
+                out = self.root / ("enriched-" + error)
+                _create_output(source, out, "deepseek-flash", selected)
+                item = read_items(out)[0]
+                item["processing_meta"]["enrichment"]["answer_generation"].update(
+                    {"status": "UNCERTAIN" if error == "INTERRUPTED_IN_FLIGHT" else "ERROR",
+                     "error": error})
+                item["processing_meta"]["enrichment"]["tag_recommendation"]["status"] = "SUCCEEDED"
+                atomic_json(out / "items" / (item["item_key"] + ".json"), item)
+                write_items(out, [item])
+                tasks = RetryOnlyTasks()
+                with patch("api.bulk_import.enrich.make_tasks", return_value=tasks):
+                    result = run(source, out, self.db, allow_model_call=True,
+                                 retry_failed=True, retry_errors={error})
+                self.assertEqual(result["answer_success"], 1)
+                self.assertEqual(result["tag_success"], 1)
+                self.assertEqual(tasks.styles, [expected_style])
+                updated = read_items(out)[0]
+                self.assertEqual(updated["processing_meta"]["model_runs"][-1]["prompt_style"], expected_style)
+
+    def test_review_pack_preserves_existing_sample_and_full_fields(self):
+        source = self.root / "batch"
+        normalize(self.db, source, "ruc", "fixture", [2020])
+        selected = _load_source(source)
+        out = self.root / "enriched"
+        _create_output(source, out, "deepseek-flash", selected)
+        item = read_items(out)[0]
+        item["ai_answer"].update({"status": "SUCCEEDED", "answer": "AI结论", "analysis": "AI推导"})
+        item["classification"] = {"topic_id": "micro", "question_type": "简答题", "difficulty": 2}
+        item["processing_meta"]["enrichment"]["answer_generation"]["status"] = "SUCCEEDED"
+        item["processing_meta"]["enrichment"]["tag_recommendation"]["status"] = "SUCCEEDED"
+        write_items(out, [item])
+        sample = review_sample(out)
+        path = review_pack(out)
+        rendered = path.read_text(encoding="utf-8")
+        self.assertEqual(len(sample), 1)
+        for marker in (item["content"]["stem_latex"], item["source_answer"]["text"],
+                       "AI结论", "AI推导", "micro", "简答题", "difficulty：2", "来源证据"):
+            self.assertIn(marker, rendered)
+        self.assertEqual(review_sample(out)[0]["item_key"], sample[0]["item_key"])
 
 
 if __name__ == "__main__":

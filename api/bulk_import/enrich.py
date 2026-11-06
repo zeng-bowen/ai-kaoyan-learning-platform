@@ -18,7 +18,7 @@ from typing import Any
 from .ai import ModelError, make_tasks
 from .contract import QUESTION_TYPES, stem_fingerprint
 from .db import list_topics
-from .storage import atomic_json, read_items, read_json, write_items
+from .storage import atomic_json, atomic_text, read_items, read_json, write_items
 
 ELIGIBLE_STATES = {"READY", "NORMALIZE_ONLY", "NEED_AI_ANSWER", "NEED_TAGGING"}
 BLOCKED_STATES = {"NEED_VISION", "NEED_SPLIT", "NEED_AI_SPLIT", "MANUAL_REVIEW",
@@ -182,13 +182,20 @@ def _run_task(item: dict, task_name: str, tasks, topics: list[dict], out: Path,
         return False
     if state["status"] in {"ERROR", "UNCERTAIN"} and retry_errors is not None and state.get("error") not in retry_errors:
         return False
+    compact_answer = (task_name == "answer_generation" and retry_failed
+                      and state.get("error") == "OUTPUT_TRUNCATED"
+                      and hasattr(tasks, "answer_compact"))
+    prompt_style = "EXAM_CONCISE" if compact_answer else "STANDARD"
     for directed_retry in range(3):
         state["status"] = "RUNNING"
+        if task_name == "answer_generation":
+            state["prompt_style"] = prompt_style
         atomic_json(_item_path(out, item["item_key"]), item)
         before = len(tasks.runs)
         try:
             if task_name == "answer_generation":
-                result = tasks.answer(item["content"]["stem_latex"])
+                answer_method = tasks.answer_compact if compact_answer else tasks.answer
+                result = answer_method(item["content"]["stem_latex"])
                 item["ai_answer"] = {"status": "SUCCEEDED", "answer": result["answer"],
                                      "analysis": result["analysis"], "provider": tasks.provider_id}
                 comparison = _answer_comparison(item)
@@ -212,6 +219,9 @@ def _run_task(item: dict, task_name: str, tasks, topics: list[dict], out: Path,
             _warning(item, task_name + " 失败：" + error)
         finally:
             new_runs = tasks.runs[before:]
+            for model_run in new_runs:
+                if task_name == "answer_generation":
+                    model_run["prompt_style"] = prompt_style
             state["calls"] += len(new_runs)
             item["processing_meta"].setdefault("model_runs", []).extend(new_runs)
             atomic_json(_item_path(out, item["item_key"]), item)
@@ -390,3 +400,50 @@ def review_sample(out: Path, limit: int = 30) -> list[dict]:
                                                "count": len(chosen), "items": chosen,
                                                "no_ai_judging": True})
     return chosen
+
+
+def review_pack(out: Path) -> Path:
+    """Render the already-selected sample for human review; no model or SQLite call."""
+    sample = read_json(out / "review-sample.json")
+    selected = sample.get("items", [])
+    if not selected or sample.get("count") != len(selected):
+        raise ValueError("抽检清单为空或数量不一致")
+    items = {item["item_key"]: item for item in read_items(out)}
+    lines = ["# 人大 834 文本增强人工抽检", "",
+             "仅供人工核对；DeepSeek 内容不是官方答案，本文件不评价答案正确性。", "",
+             f"抽检数量：{len(selected)}。来源为既有 review-sample.json，顺序不重新抽取。", ""]
+    for index, entry in enumerate(selected, 1):
+        item = items.get(entry["item_key"])
+        if item is None:
+            raise ValueError("抽检题缺少结果：" + entry["item_key"])
+        source = item["source"]
+        answer = item["source_answer"]
+        ai = item["ai_answer"]
+        classification = item["classification"]
+        warnings = item["validation"].get("warnings", [])
+        retry_count = entry.get("retry_count", 0)
+        lines.extend([f"## {index}. {entry.get('year_sequence') or entry['item_key']}", "",
+                      f"候选 ID：`{entry['item_key']}`；抽检原因：{entry.get('reason', '未标注')}；"
+                      f"曾重试：{'是' if retry_count else '否'}。", "",
+                      f"来源：{source.get('name') or '未标注'}；年份：{source.get('exam_year') or '未标注'}；"
+                      f"原始文件：{source.get('file_name') or '未标注'}；页码：{source.get('pages') or []}。", "",
+                      "### 完整题干", "", item["content"].get("stem_latex") or "（空）", "",
+                      "### 来源／参考答案", "",
+                      f"类型：{answer.get('kind') or '未标注'}；核验：{answer.get('human_verified')}。", "",
+                      answer.get("text") or "（无）", "",
+                      "来源解析：", "", answer.get("analysis") or "（无）", "",
+                      "来源证据：", "",
+                      json.dumps(answer.get("evidence", []), ensure_ascii=False, indent=2), "",
+                      "### DeepSeek 答案", "",
+                      f"状态：{ai.get('status') or '未知'}。", "",
+                      ai.get("answer") or "（待处理）", "",
+                      "解析：", "", ai.get("analysis") or "（待处理）", "",
+                      "### 标签与警告", "",
+                      f"topic_id：`{classification.get('topic_id')}`；"
+                      f"question_type：{classification.get('question_type')}；"
+                      f"difficulty：{classification.get('difficulty')}。", "",
+                      "warnings：", "", "\n".join("- " + str(w) for w in warnings) or "（无）", "",
+                      "人工核对结论：____________", "", "---", ""])
+    path = out / "review-sample-full.md"
+    atomic_text(path, "\n".join(lines))
+    return path
