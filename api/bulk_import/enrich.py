@@ -345,7 +345,12 @@ def review_sample(out: Path, limit: int = 30) -> list[dict]:
     def add(item: dict, reason: str) -> None:
         if len(chosen) < limit and item["item_key"] not in seen:
             seen.add(item["item_key"])
+            legacy_id = item["processing_meta"].get("legacy_candidate_id", "")
+            sequence = legacy_id.rsplit("-", 1)[-1] if legacy_id else None
             chosen.append({"item_key": item["item_key"], "year": item["source"]["exam_year"],
+                           "legacy_candidate_id": legacy_id, "year_sequence": (
+                               f"{item['source']['exam_year']}-{int(sequence)}"
+                               if sequence and sequence.isdigit() else None),
                            "source_pages": item["source"]["pages"],
                            "stem_excerpt": item["content"]["stem_latex"][:80],
                            "topic_id": item["classification"]["topic_id"],
