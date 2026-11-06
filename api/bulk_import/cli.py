@@ -198,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
     enrich.add_argument("--plan-only", action="store_true")
     enrich.add_argument("--allow-model-call", action="store_true")
     enrich.add_argument("--retry-failed", action="store_true", help="显式重试失败或中断时在途的任务")
+    enrich.add_argument("--retry-error", action="append", choices=["OUTPUT_TRUNCATED", "INVALID_STRUCTURED_RESPONSE",
+                                                            "NETWORK_OR_TIMEOUT", "HTTP_429", "HTTP_500",
+                                                            "HTTP_502", "HTTP_503", "HTTP_504"])
     report = sub.add_parser("report-legacy-enrichment", help="仅从本地检查点重建统计和人工抽检清单")
     report.add_argument("batch_dir", type=Path)
     for name in ("preview", "validate", "confirm", "import", "retry"):
@@ -222,14 +225,19 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(normalize_legacy(args.db, args.out, args.target_id,
                                               args.source_contains, args.year), ensure_ascii=False, indent=2))
         elif args.command == "enrich-legacy":
+            if args.retry_error and not args.retry_failed:
+                raise ValueError("--retry-error 需要同时指定 --retry-failed")
+            retry_errors = set(args.retry_error) if args.retry_error else None
             if args.plan_only:
                 print(json.dumps(plan_legacy_enrichment(args.source_batch, args.out, args.db,
-                                                        retry_failed=args.retry_failed),
+                                                        retry_failed=args.retry_failed,
+                                                        retry_errors=retry_errors),
                                  ensure_ascii=False, indent=2))
             else:
                 summary = run_legacy_enrichment(args.source_batch, args.out, args.db,
                                                 allow_model_call=args.allow_model_call,
-                                                retry_failed=args.retry_failed)
+                                                retry_failed=args.retry_failed,
+                                                retry_errors=retry_errors)
                 review_sample(args.out)
                 print(json.dumps(summary, ensure_ascii=False, indent=2))
         elif args.command == "report-legacy-enrichment":

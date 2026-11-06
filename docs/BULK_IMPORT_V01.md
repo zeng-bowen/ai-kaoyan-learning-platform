@@ -59,6 +59,8 @@ python -m api.bulk_import.cli enrich-legacy --source-batch 'C:\batches\legacy-83
 python -m api.bulk_import.cli report-legacy-enrichment 'C:\batches\legacy-834-text-001'
 ```
 
+若仅有长答案达到输出上限，可由管理员先设置本机 `DEEPSEEK_ANSWER_MAX_TOKENS=8192`，预检 `enrich-legacy ... --plan-only --retry-failed --retry-error OUTPUT_TRUNCATED`，再以相同参数加 `--allow-model-call` 定向补跑。成功项和其他错误类别不会被重发；不得把输出上限无限调高或反复盲试。
+
 实际调用前须在后端环境配置 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL=deepseek-flash`。一次仅运行一个进程，串行处理；每题答案与标签分别保存检查点，成功项续跑时不会再调用。无效 JSON 最多定向重试两次；明确 `OUTPUT_TRUNCATED` 不重复发送同样请求。HTTP 401/403 停止批次，429/暂时性 5xx/超时使用适配器已有的有限重试。中断后用同一命令、同一输出目录续跑；不要更换输入 JSONL 或模型。失败与中断时在途的任务默认不再自动重试；核对后方可显式加 `--retry-failed`。刚发出但尚未来得及保存结果的在途请求无法提供严格的外部 exactly-once 保证。
 
 增强输出包括 `manifest.json`、`items/<item_key>.json`、`questions.jsonl`、`progress.json`、完成后的 `summary.json` 和 `review-sample.json`。最后一个命令仅从本地结果重建统计、重复题 Warning 和约 30 题抽检清单，不发模型请求。所有结果保留来源答案和历史标签快照；AI 答案只写 `ai_answer`，标签结果只写 `classification`，历史 SQLite 始终只读。`ANSWER_CONFLICT` 是保守的数值结果不一致候选警告，不代表模型或来源谁正确；未能自动比对的答案应进入人工核验范围。抽检清单不含完整长答案，人工审查须对照单题检查点和来源 PDF。输出目录须保持 Git 忽略，不得直接把增强批次当作已审核正式题库。
@@ -89,7 +91,7 @@ python -m api.bulk_import.cli report-legacy-enrichment 'C:\batches\legacy-834-te
 | 豆包 | `DOUBAO_ARK_API_KEY`, `DOUBAO_ARK_MODEL` | `DOUBAO_ARK_BASE_URL`, `DOUBAO_ARK_TIMEOUT_SECONDS`, `DOUBAO_ARK_RETRIES` | `https://ark.cn-beijing.volces.com/api/v3` |
 | DeepSeek | `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL` | `DEEPSEEK_BASE_URL`, `DEEPSEEK_TIMEOUT_SECONDS`, `DEEPSEEK_RETRIES` | `https://api.deepseek.com` |
 
-超时默认 30 秒；额外重试默认 2 次、最多 3 次，仅对 429、暂时性 5xx 与网络/超时错误重试；401/403 和 JSON 格式错误不重试。Base URL 必须为 HTTPS。两家费用估算均只使用运营者另行配置的 `{前缀}_INPUT_PRICE_PER_MILLION`、`{前缀}_OUTPUT_PRICE_PER_MILLION`、`{前缀}_PRICE_CURRENCY`（前缀分别为 `DOUBAO_ARK` 和 `DEEPSEEK`）；费率或 usage 缺失时 `estimated_cost=null`，不得当成免费。`processing_meta.model_runs` 统一记录 task、provider、model、tokens、duration_ms、attempts、estimated_cost、currency、脱敏 error。密钥仅从后端环境变量读取，不进入前端、JSONL、数据库、日志或 Git。
+超时默认 30 秒；额外重试默认 2 次、最多 3 次，仅对 429、暂时性 5xx 与网络/超时错误重试；401/403 和 JSON 格式错误不在传输层重试。长答案输出上限默认 4,000，可通过 `{前缀}_ANSWER_MAX_TOKENS` 在 512–16,384 范围内配置；标签上限仍为 2,000。Base URL 必须为 HTTPS。两家费用估算均只使用运营者另行配置的 `{前缀}_INPUT_PRICE_PER_MILLION`、`{前缀}_OUTPUT_PRICE_PER_MILLION`、`{前缀}_PRICE_CURRENCY`（前缀分别为 `DOUBAO_ARK` 和 `DEEPSEEK`）；费率或 usage 缺失时 `estimated_cost=null`，不得当成免费。`processing_meta.model_runs` 统一记录 task、provider、model、tokens、duration_ms、attempts、estimated_cost、currency、脱敏 error。密钥仅从后端环境变量读取，不进入前端、JSONL、数据库、日志或 Git。
 
 首轮文字 Pilot 中三次长答案均在旧的 2,000 输出 Token 上限处返回无效 JSON。现在两家共用的答案上限为 4,000，标签任务仍为 2,000；Prompt 和题干不因 Provider 改动。两家文本请求均显式发送 `response_format={"type":"json_object"}`，减少仅靠 Prompt 约束导致的格式错误。若 API 明确返回 `finish_reason=length`，记录 `OUTPUT_TRUNCATED`，不盲目重复调用。已生成的成功结果不应为此重跑。真实试验观察到豆包某些文本调用超过默认 30 秒；试验时可单独配置超时，不能把超时或无效 JSON 当成正确答案。
 

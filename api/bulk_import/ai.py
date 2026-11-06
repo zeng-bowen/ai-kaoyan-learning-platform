@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import math
 import os
 import socket
@@ -76,18 +77,22 @@ class _TextTasks:
         try:
             self.timeout = float(os.environ.get(prefix + "_TIMEOUT_SECONDS", "30"))
             self.retries = min(3, max(0, int(os.environ.get(prefix + "_RETRIES", "2"))))
+            self.answer_max_tokens = int(os.environ.get(prefix + "_ANSWER_MAX_TOKENS", "4000"))
         except ValueError as exc:
-            raise ModelError(prefix + " timeout/retries configuration is invalid") from exc
+            raise ModelError(prefix + " timeout/retries/answer token configuration is invalid") from exc
         if self.timeout <= 0:
             raise ModelError(prefix + "_TIMEOUT_SECONDS must be positive")
+        if not 512 <= self.answer_max_tokens <= 16384:
+            raise ModelError(prefix + "_ANSWER_MAX_TOKENS must be between 512 and 16384")
         self.runs: list[dict[str, Any]] = []
 
     def _call(self, task: str, prompt: str) -> dict[str, Any]:
+        max_output_tokens = self.answer_max_tokens if task == "answer_generation" else 2000
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 4000 if task == "answer_generation" else 2000,
+            "max_tokens": max_output_tokens,
         }
         if self.json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -127,6 +132,7 @@ class _TextTasks:
                     raise ModelError("answer result is incomplete")
                 cost = self._cost(input_tokens, output_tokens)
                 self.runs.append({"task": task, "provider": self.provider_id, "model": self.model,
+                                  "max_output_tokens": max_output_tokens,
                                   "duration_ms": round((time.monotonic() - started) * 1000),
                                   "attempts": attempt + 1, "input_tokens": input_tokens,
                                   "output_tokens": output_tokens, "estimated_cost": cost,
@@ -137,7 +143,7 @@ class _TextTasks:
                 last_error = "HTTP_" + str(exc.code)
                 if exc.code not in (429, 500, 502, 503, 504):
                     break
-            except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
+            except (urllib.error.URLError, socket.timeout, TimeoutError, OSError, http.client.HTTPException):
                 last_error = "NETWORK_OR_TIMEOUT"
             except (ValueError, KeyError, IndexError, TypeError, AttributeError, ModelError):
                 last_error = "INVALID_STRUCTURED_RESPONSE"
@@ -146,6 +152,7 @@ class _TextTasks:
                 time.sleep(min(4, 2 ** attempt))
         cost = self._cost(input_tokens, output_tokens)
         self.runs.append({"task": task, "provider": self.provider_id, "model": self.model,
+                          "max_output_tokens": max_output_tokens,
                           "duration_ms": round((time.monotonic() - started) * 1000),
                           "attempts": attempt + 1, "input_tokens": input_tokens, "output_tokens": output_tokens,
                           "estimated_cost": cost,

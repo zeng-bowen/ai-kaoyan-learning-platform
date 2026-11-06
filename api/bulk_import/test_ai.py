@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import http.client
 import json
 import os
 import socket
@@ -31,6 +32,30 @@ class FakeResponse:
 
 
 class TextProviderTests(unittest.TestCase):
+    def test_incomplete_http_response_is_bounded_network_error(self):
+        env = {"DEEPSEEK_API_KEY": "fixture-secret", "DEEPSEEK_MODEL": "fixture-model",
+               "DEEPSEEK_RETRIES": "0"}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen",
+                side_effect=http.client.IncompleteRead(b"", 1)) as send:
+            tasks = DeepSeekTasks()
+            with self.assertRaisesRegex(ModelError, "NETWORK_OR_TIMEOUT"):
+                tasks.answer("测试题干")
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(tasks.runs[-1]["error"], "NETWORK_OR_TIMEOUT")
+
+    def test_answer_output_limit_can_be_raised_without_changing_tag_limit(self):
+        env = {"DEEPSEEK_API_KEY": "fixture-secret", "DEEPSEEK_MODEL": "fixture-model",
+               "DEEPSEEK_ANSWER_MAX_TOKENS": "8192"}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen",
+                return_value=FakeResponse('{"answer":"ok","analysis":"ok"}')) as send:
+            tasks = DeepSeekTasks()
+            tasks.answer("测试题干")
+            self.assertEqual(json.loads(send.call_args.args[0].data)["max_tokens"], 8192)
+            self.assertEqual(tasks.runs[-1]["max_output_tokens"], 8192)
+        with patch.dict(os.environ, {**env, "DEEPSEEK_ANSWER_MAX_TOKENS": "999999"}, clear=True):
+            with self.assertRaisesRegex(ModelError, "ANSWER_MAX_TOKENS"):
+                DeepSeekTasks()
+
     def test_default_gate_never_reads_credentials_or_calls_http(self):
         with patch.dict(os.environ, {}, clear=True), patch("urllib.request.urlopen") as send:
             self.assertEqual(make_tasks("doubao").__class__.__name__, "DisabledTasks")

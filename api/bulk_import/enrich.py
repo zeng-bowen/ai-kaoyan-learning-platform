@@ -92,7 +92,8 @@ def _create_output(source_batch: Path, out: Path, model: str, selected: list[dic
     _snapshot(out, selected)
 
 
-def plan(source_batch: Path, out: Path, db_path: Path, *, retry_failed: bool = False) -> dict[str, Any]:
+def plan(source_batch: Path, out: Path, db_path: Path, *, retry_failed: bool = False,
+         retry_errors: set[str] | None = None) -> dict[str, Any]:
     if not db_path.is_file():
         raise FileNotFoundError("指定 SQLite 不存在")
     selected = _load_source(source_batch)
@@ -115,8 +116,12 @@ def plan(source_batch: Path, out: Path, db_path: Path, *, retry_failed: bool = F
             saved = read_json(path)
             answer_status = _task_state(saved, "answer_generation")["status"]
             tag_status = _task_state(saved, "tag_recommendation")["status"]
-            pending_answer += answer_status == "PENDING" or (retry_failed and answer_status != "SUCCEEDED")
-            pending_tag += tag_status == "PENDING" or (retry_failed and tag_status != "SUCCEEDED")
+            answer_retry = retry_failed and answer_status != "SUCCEEDED" and (
+                retry_errors is None or _task_state(saved, "answer_generation").get("error") in retry_errors)
+            tag_retry = retry_failed and tag_status != "SUCCEEDED" and (
+                retry_errors is None or _task_state(saved, "tag_recommendation").get("error") in retry_errors)
+            pending_answer += answer_status == "PENDING" or answer_retry
+            pending_tag += tag_status == "PENDING" or tag_retry
             failed_answer += answer_status in {"ERROR", "RUNNING", "UNCERTAIN"}
             failed_tag += tag_status in {"ERROR", "RUNNING", "UNCERTAIN"}
     else:
@@ -134,7 +139,7 @@ def plan(source_batch: Path, out: Path, db_path: Path, *, retry_failed: bool = F
 def _assignments(text: str) -> dict[str, set[str]]:
     compact = text.replace("$", "").replace("\\(", "").replace("\\)", "")
     found: dict[str, set[str]] = defaultdict(set)
-    for match in re.finditer(r"(?<![A-Za-z])([A-Za-z][A-Za-z0-9_]{0,3})\s*=\s*(-?\d+(?:\.\d+)?)", compact):
+    for match in re.finditer(r"(?<![A-Za-z])([A-Za-z][A-Za-z0-9_]{0,3})(?:\s*\^\{\*\}|\*)?\s*=\s*(-?\d+(?:\.\d+)?)", compact):
         found[match.group(1).upper()].add(match.group(2))
     return found
 
@@ -163,16 +168,19 @@ def _warning(item: dict, message: str) -> None:
 
 
 def _run_task(item: dict, task_name: str, tasks, topics: list[dict], out: Path,
-              *, retry_failed: bool = False) -> bool:
+              *, retry_failed: bool = False, retry_errors: set[str] | None = None) -> bool:
     state = _task_state(item, task_name)
     if state["status"] == "SUCCEEDED":
         return False
-    if state["status"] == "RUNNING" and not retry_failed:
+    if state["status"] == "RUNNING" and (not retry_failed or
+                                          (retry_errors is not None and state.get("error") not in retry_errors)):
         state.update({"status": "UNCERTAIN", "error": "INTERRUPTED_IN_FLIGHT"})
         _warning(item, task_name + " 中断时正在调用；是否已计费不明，需显式 --retry-failed 才会重试")
         atomic_json(_item_path(out, item["item_key"]), item)
         return False
     if state["status"] in {"ERROR", "UNCERTAIN"} and not retry_failed:
+        return False
+    if state["status"] in {"ERROR", "UNCERTAIN"} and retry_errors is not None and state.get("error") not in retry_errors:
         return False
     for directed_retry in range(3):
         state["status"] = "RUNNING"
@@ -225,8 +233,8 @@ def _snapshot(out: Path, selected: list[dict]) -> list[dict]:
 
 
 def run(source_batch: Path, out: Path, db_path: Path, *, allow_model_call: bool = False,
-        retry_failed: bool = False) -> dict:
-    initial = plan(source_batch, out, db_path, retry_failed=retry_failed)
+        retry_failed: bool = False, retry_errors: set[str] | None = None) -> dict:
+    initial = plan(source_batch, out, db_path, retry_failed=retry_failed, retry_errors=retry_errors)
     if not allow_model_call:
         raise ModelError("真实批量调用需要 --allow-model-call")
     tasks = make_tasks("deepseek", True)
@@ -242,7 +250,8 @@ def run(source_batch: Path, out: Path, db_path: Path, *, allow_model_call: bool 
         target_topics = topics_by_target[item["exam_scope"]["target_id"]]
         halted = False
         for task_name in ("answer_generation", "tag_recommendation"):
-            halted = _run_task(item, task_name, tasks, target_topics, out, retry_failed=retry_failed)
+            halted = _run_task(item, task_name, tasks, target_topics, out,
+                               retry_failed=retry_failed, retry_errors=retry_errors)
             if halted:
                 break
         _snapshot(out, selected)
@@ -258,6 +267,12 @@ def run(source_batch: Path, out: Path, db_path: Path, *, allow_model_call: bool 
 
 def summarize(out: Path) -> dict:
     items = read_items(out)
+    for item in items:
+        if item["ai_answer"]["status"] == "SUCCEEDED":
+            comparison = _answer_comparison(item)
+            item["processing_meta"]["answer_comparison"] = comparison
+            if comparison == "POTENTIAL_CONFLICT":
+                _warning(item, "ANSWER_CONFLICT：来源与 AI 数值结果可能不一致，需人工核对原件")
     grouped: dict[str, list[dict]] = defaultdict(list)
     for item in items:
         grouped[stem_fingerprint(item["content"]["stem_latex"])].append(item)
@@ -284,6 +299,7 @@ def summarize(out: Path) -> dict:
     summary = {
         "eligible": len(items), "answer_success": sum(a == "SUCCEEDED" for a, _ in states),
         "answer_failed": sum(a in {"ERROR", "UNCERTAIN"} for a, _ in states),
+        "answer_inflight_uncertain": sum(a == "UNCERTAIN" for a, _ in states),
         "tag_success": sum(t == "SUCCEEDED" for _, t in states),
         "tag_failed": sum(t in {"ERROR", "UNCERTAIN"} for _, t in states),
         "topic_null": sum(item["classification"]["topic_id"] is None for item in items),
@@ -292,9 +308,17 @@ def summarize(out: Path) -> dict:
         "answer_json_retries": sum(json_retries(item, "answer_generation") for item in items),
         "tag_json_retries": sum(json_retries(item, "tag_recommendation") for item in items),
         "error_categories": dict(errors),
+        "network_or_timeout_recorded": errors["NETWORK_OR_TIMEOUT"],
+        "http_429_recorded": errors["HTTP_429"],
+        "http_5xx_recorded": sum(count for error, count in errors.items()
+                                 if error in {"HTTP_500", "HTTP_502", "HTTP_503", "HTTP_504"}),
         "extra_transport_attempts": sum(max(0, run.get("attempts", 1) - 1) for run in runs),
+        "model_run_count": len(runs),
+        "successful_run_count": len(success),
         "total_input_tokens_known": sum(run.get("input_tokens") or 0 for run in runs),
         "total_output_tokens_known": sum(run.get("output_tokens") or 0 for run in runs),
+        "average_known_tokens_per_item": round(sum((run.get("input_tokens") or 0) +
+                                                   (run.get("output_tokens") or 0) for run in runs) / len(items), 2) if items else 0,
         "average_success_tokens_per_item": round(sum((run.get("input_tokens") or 0) +
                                                       (run.get("output_tokens") or 0) for run in success) / len(items), 2) if items else 0,
         "average_answer_duration_ms": round(sum(run["duration_ms"] for run in answers) / len(answers)) if answers else None,

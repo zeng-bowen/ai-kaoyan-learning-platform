@@ -154,6 +154,8 @@ class LegacyTests(unittest.TestCase):
         self.assertEqual(_answer_comparison(item), "POTENTIAL_CONFLICT")
         item["ai_answer"]["answer"] = "由约束求得 X=18，Y=10"
         self.assertEqual(_answer_comparison(item), "NUMERIC_AGREEMENT")
+        item["ai_answer"]["answer"] = "最优需求为 X*=24，Y*=13"
+        self.assertEqual(_answer_comparison(item), "POTENTIAL_CONFLICT")
 
     def test_invalid_json_is_retried_once_and_checkpointed(self):
         source = self.root / "batch"
@@ -256,6 +258,10 @@ class LegacyTests(unittest.TestCase):
             run(source, out, self.db, allow_model_call=True)
         self.assertEqual(len(second.runs), 0)
         self.assertEqual(plan(source, out, self.db, retry_failed=True)["answer_calls_pending"], 1)
+        self.assertEqual(plan(source, out, self.db, retry_failed=True,
+                              retry_errors={"INVALID_STRUCTURED_RESPONSE"})["answer_calls_pending"], 0)
+        self.assertEqual(plan(source, out, self.db, retry_failed=True,
+                              retry_errors={"OUTPUT_TRUNCATED"})["answer_calls_pending"], 1)
 
 
 if __name__ == "__main__":
