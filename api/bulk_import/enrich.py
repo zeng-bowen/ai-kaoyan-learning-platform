@@ -10,13 +10,14 @@ import copy
 import hashlib
 import json
 import re
+import shutil
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .ai import ModelError, make_tasks
-from .contract import QUESTION_TYPES, stem_fingerprint
+from .contract import QUESTION_TYPES, sha256_file, stem_fingerprint
 from .db import list_topics
 from .storage import atomic_json, atomic_text, read_items, read_json, write_items
 
@@ -41,6 +42,45 @@ def _eligible(item: dict) -> bool:
 
 def _source_digest(source_batch: Path) -> str:
     return hashlib.sha256((source_batch / "questions.jsonl").read_bytes()).hexdigest()
+
+
+def stage_for_review(source_batch: Path, enriched_batch: Path, out: Path) -> dict[str, int]:
+    """Make a separate V0.1 review batch; never confirm or import any item."""
+    roots = [path.resolve() for path in (source_batch, enriched_batch, out)]
+    if len(set(roots)) != 3 or any(a in b.parents for a in roots for b in roots if a != b):
+        raise ValueError("来源、增强与审核批次目录必须相互独立")
+    if out.exists():
+        raise ValueError("审核输出目录已存在；禁止覆盖")
+    source_manifest = read_json(source_batch / "manifest.json")
+    enriched_manifest = read_json(enriched_batch / "manifest.json")
+    if source_manifest.get("schema_version") != "0.1" or enriched_manifest.get("input_digest") != _source_digest(source_batch):
+        raise ValueError("来源批次版本或增强输入摘要不匹配")
+    sha = source_manifest.get("source_sha256", "")
+    asset = f"assets/source-{sha}.pdf"
+    if not re.fullmatch(r"[0-9a-f]{64}", sha) or source_manifest.get("source_asset") != asset:
+        raise ValueError("来源 PDF 资源声明无效")
+    source_pdf = source_batch / asset
+    if sha256_file(source_pdf) != sha:
+        raise ValueError("来源 PDF 哈希不匹配")
+    items = read_items(enriched_batch)
+    if len(items) != enriched_manifest.get("eligible") or len({item["item_key"] for item in items}) != len(items):
+        raise ValueError("增强题目数量或 item_key 不一致")
+    if any(item["source"].get("file_sha256") != sha or item["source"].get("file_name") != source_manifest.get("source_file")
+           or item["content"].get("assets") for item in items):
+        raise ValueError("增强结果包含来源不符或需要视觉处理的题目")
+    (out / "assets").mkdir(parents=True)
+    shutil.copyfile(source_pdf, out / asset)
+    if sha256_file(out / asset) != sha:
+        raise ValueError("审核批次 PDF 复制后哈希不匹配")
+    manifest = dict(source_manifest)
+    manifest.update({"question_count": len(items), "staged_from_enrichment": str(enriched_batch.resolve()),
+                     "enrichment_input_digest": enriched_manifest["input_digest"],
+                     "formal_database_write": False})
+    atomic_json(out / "manifest.json", manifest)
+    write_items(out, items)
+    atomic_json(out / "progress.json", {"schema_version": "0.1", "items": {
+        item["item_key"]: {"status": "PENDING", "attempts": 0} for item in items}})
+    return {"items": len(items), "confirmed": 0, "imported": 0}
 
 
 def _load_source(source_batch: Path) -> list[dict]:

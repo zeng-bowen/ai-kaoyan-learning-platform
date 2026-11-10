@@ -45,4 +45,8 @@
 .suggestion-block b{display:block;font-size:11px;color:#4d6b5b;margin-bottom:2px}
 .suggestion-block p{margin:0;font-size:12px;line-height:1.6;color:#33503f;white-space:pre-wrap;word-break:break-word}
 .suggestion-confidence{margin:8px 0 0;font-size:11px;line-height:1.6;color:#8a6a2d;background:#fbf5e7;border-radius:5px;padding:6px 8px;word-break:break-word}
+.answer-separation{border-top:1px solid #dce5d9;margin:20px 0 16px;padding-top:18px}
+.answer-separation h3{font-size:15px;color:#245747;margin:0 0 7px}
+.answer-separation>div{margin-top:14px}.answer-separation strong{font-size:12px;color:#3d5c4c}
+.answer-separation .answer-text{white-space:pre-wrap;overflow-wrap:anywhere;color:#203c34;max-width:78ch}
 @media(max-width:760px){.upload-control{flex-wrap:wrap;white-space:nowrap}.intake-head{display:block}.intake-head .admin-actions{margin-top:10px}.suggestion-head{flex-direction:column;align-items:flex-start;gap:2px}.suggestion-card{padding:10px 11px}.recognize-panel{padding:12px}}

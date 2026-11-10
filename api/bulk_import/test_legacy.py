@@ -10,12 +10,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from api.bulk_import.cli import retry_item
+from api.bulk_import.cli import retry_item, validate_batch
 from api.bulk_import.ai import ModelError
 from api.bulk_import.legacy import _split_attempt, _text, _type, audit, normalize
 from api.bulk_import.enrich import (_answer_comparison, _create_output, _load_source,
-                                    plan, review_pack, review_sample, run, summarize)
-from api.bulk_import.storage import atomic_json, read_items, write_items
+                                    plan, review_pack, review_sample, run, stage_for_review, summarize)
+from api.bulk_import.storage import atomic_json, read_items, read_json, write_items
 
 
 class LegacyTests(unittest.TestCase):
@@ -141,6 +141,13 @@ class LegacyTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before_db)
         self.assertEqual(hashlib.sha256((source / "questions.jsonl").read_bytes()).hexdigest(), before_jsonl)
         self.assertEqual(len(review_sample(out)), 1)
+        staged = self.root / "review-batch"
+        self.assertEqual(stage_for_review(source, out, staged), {"items": 1, "confirmed": 0, "imported": 0})
+        self.assertEqual(validate_batch(staged), (1, 0))
+        self.assertEqual(read_json(staged / "progress.json")["items"][enriched["item_key"]]["status"], "READY")
+        self.assertNotIn("confirmed_digest", read_json(staged / "progress.json")["items"][enriched["item_key"]])
+        with self.assertRaisesRegex(ValueError, "已存在"):
+            stage_for_review(source, out, staged)
         duplicate = json.loads(json.dumps(enriched))
         duplicate["item_key"] = "legacy-fixture-duplicate"
         atomic_json(out / "items" / (duplicate["item_key"] + ".json"), duplicate)

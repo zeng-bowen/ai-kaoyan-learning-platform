@@ -12,7 +12,7 @@ from pathlib import Path
 from .ai import ModelError, make_tasks
 from .contract import canonical_digest, sha256_file, stem_fingerprint, validate_item
 from .db import connect_existing, import_one, list_topics
-from .enrich import plan as plan_legacy_enrichment, review_pack, review_sample, run as run_legacy_enrichment, summarize
+from .enrich import plan as plan_legacy_enrichment, review_pack, review_sample, run as run_legacy_enrichment, stage_for_review, summarize
 from .legacy import audit as audit_legacy, normalize as normalize_legacy
 from .pipeline import prepare
 from .storage import atomic_json, read_items, read_json, write_items
@@ -205,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("batch_dir", type=Path)
     review = sub.add_parser("review-legacy-enrichment", help="从既有抽检名单生成完整题干、答案和标签的人工 Review 文件")
     review.add_argument("batch_dir", type=Path)
+    stage = sub.add_parser("stage-legacy-enrichment", help="将文本增强结果转为独立 V0.1 审核批次；不确认、不入库")
+    stage.add_argument("--source-batch", type=Path, required=True)
+    stage.add_argument("--enriched-batch", type=Path, required=True)
+    stage.add_argument("--out", type=Path, required=True)
     for name in ("preview", "validate", "confirm", "import", "retry"):
         command = sub.add_parser(name)
         command.add_argument("batch_dir", type=Path)
@@ -251,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
                              ensure_ascii=False, indent=2))
         elif args.command == "review-legacy-enrichment":
             print(review_pack(args.batch_dir))
+        elif args.command == "stage-legacy-enrichment":
+            print(json.dumps(stage_for_review(args.source_batch, args.enriched_batch, args.out), ensure_ascii=False))
         elif args.command == "model-smoke":
             if args.provider != "mock" and not args.allow_model_call:
                 raise ModelError("真实连接测试需要 --allow-model-call；本轮未经批准请勿使用")

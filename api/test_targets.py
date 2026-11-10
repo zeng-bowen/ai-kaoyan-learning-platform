@@ -2,6 +2,7 @@
 
 import importlib
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -132,6 +133,59 @@ class TargetCatalogTests(unittest.TestCase):
         edit = client.put('/api/admin/questions/q-review-test', json={**payload, 'catalog_number': created.json()['catalog_number'], 'stem': '修改后需要重新审核的测试题干。'})
         self.assertEqual(edit.status_code, 200, edit.text)
         self.assertFalse(any(q['id'] == payload['id'] for q in client.get('/api/questions').json()))
+
+    def test_independent_ai_answer_is_admin_only_and_becomes_stale_on_stem_edit(self):
+        client = TestClient(self.api.app)
+        payload = {
+            'id': 'q-independent-ai', 'target_id': 'legacy', 'topic_id': 'legacy-topic',
+            'source_type': 'CURATED_EXERCISE', 'source_name': '本地测试来源',
+            'question_type': '简答题', 'difficulty': 3, 'stem': '解释本地测试的经济学概念。',
+            'answer': '来源答案', 'analysis': '来源解析',
+        }
+        created = client.post('/api/admin/questions', json=payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        with sqlite3.connect(self.path) as con:
+            con.execute("UPDATE questions SET ai_answer_json=?,import_meta_json=?,source_answer_kind='REFERENCE' WHERE id=?",
+                        (json.dumps({'status': 'SUCCEEDED', 'answer': '独立 AI 答案', 'analysis': 'AI 解析', 'provider': 'deepseek'}),
+                         json.dumps({'item_key': 'secret-internal'}), payload['id']))
+        admin = next(q for q in client.get('/api/admin/questions').json() if q['id'] == payload['id'])
+        self.assertEqual(json.loads(admin['ai_answer_json'])['answer'], '独立 AI 答案')
+        self.assertEqual(admin['answer'], '来源答案')
+        self.assertEqual(client.post('/api/admin/questions/q-independent-ai/review', json={'decision': 'APPROVED'}).status_code, 200)
+        public = next(q for q in client.get('/api/questions').json() if q['id'] == payload['id'])
+        self.assertEqual(public['answer'], '来源答案')
+        self.assertNotIn('ai_answer_json', public)
+        self.assertNotIn('import_meta_json', public)
+        changed = client.put('/api/admin/questions/q-independent-ai', json={**payload,
+            'catalog_number': created.json()['catalog_number'], 'stem': '解释修改后的本地测试经济学概念。'})
+        self.assertEqual(changed.status_code, 200, changed.text)
+        current = next(q for q in client.get('/api/admin/questions').json() if q['id'] == payload['id'])
+        self.assertEqual(json.loads(current['ai_answer_json'])['status'], 'STALE')
+        self.assertEqual(current['answer'], '来源答案')
+        self.assertEqual(current['review_status'], 'DRAFT')
+
+    def test_past_exam_without_url_requires_preserved_pdf_for_approval(self):
+        client = TestClient(self.api.app)
+        payload = {
+            'id': 'q-local-pdf-evidence', 'target_id': 'legacy', 'topic_id': 'legacy-topic',
+            'source_type': 'TARGET_PAST_EXAM', 'source_name': '本地测试试卷', 'exam_year': 2020,
+            'source_url': '', 'source_verified': True, 'question_type': '计算题', 'difficulty': 3,
+            'stem': '计算一项用于本地测试的经济指标。', 'answer': '来源答案', 'analysis': '来源解析',
+        }
+        created = client.post('/api/admin/questions', json=payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        endpoint = '/api/admin/questions/q-local-pdf-evidence/review'
+        self.assertEqual(client.post(endpoint, json={'decision': 'APPROVED'}).status_code, 422)
+        pdf = b'%PDF-1.4\nlocal-test-source\n%%EOF\n'
+        sha = hashlib.sha256(pdf).hexdigest()
+        source_dir = self.path.parent / 'question-sources'
+        source_dir.mkdir(exist_ok=True)
+        (source_dir / f'{sha}.pdf').write_bytes(pdf)
+        with sqlite3.connect(self.path) as con:
+            con.execute('UPDATE questions SET import_meta_json=? WHERE id=?',
+                        (json.dumps({'file_sha256': sha, 'source_storage_path': f'question-sources/{sha}.pdf',
+                                     'pages': [1]}), payload['id']))
+        self.assertEqual(client.post(endpoint, json={'decision': 'APPROVED'}).status_code, 200)
 
     def test_presence_and_admin_metric_are_separate_from_correctness(self):
         client = TestClient(self.api.app)

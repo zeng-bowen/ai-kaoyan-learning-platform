@@ -67,6 +67,18 @@ python -m api.bulk_import.cli report-legacy-enrichment 'C:\batches\legacy-834-te
 
 增强输出包括 `manifest.json`、`items/<item_key>.json`、`questions.jsonl`、`progress.json`、完成后的 `summary.json` 和 `review-sample.json`。最后一个命令仅从本地结果重建统计、重复题 Warning 和约 30 题抽检清单，不发模型请求。所有结果保留来源答案和历史标签快照；AI 答案只写 `ai_answer`，标签结果只写 `classification`，历史 SQLite 始终只读。`ANSWER_CONFLICT` 是保守的数值结果不一致候选警告，不代表模型或来源谁正确；未能自动比对的答案应进入人工核验范围。抽检清单不含完整长答案，人工审查须对照单题检查点和来源 PDF。输出目录须保持 Git 忽略，不得直接把增强批次当作已审核正式题库。
 
+历史增强批次的 manifest 是模型实验记录，不能直接送入 `import`。先在独立的 Git 忽略目录创建审核批次，不会确认任何题或写库；再对照原 PDF 逐题核验，修正短题干、缺失题型/难度及来源答案错配，运行 `validate`，只对确实核验通过的 item 使用 `confirm`，最后按小批次执行 `import`：
+
+```powershell
+python -m api.bulk_import.cli stage-legacy-enrichment --source-batch 'C:\batches\legacy-834-001' --enriched-batch 'C:\batches\legacy-834-text-001' --out 'C:\batches\legacy-834-review-001'
+python -m api.bulk_import.cli validate 'C:\batches\legacy-834-review-001' --db 'C:\platform\platform.db'
+python -m api.bulk_import.cli preview 'C:\batches\legacy-834-review-001'
+python -m api.bulk_import.cli confirm 'C:\batches\legacy-834-review-001' --item-key '人工核验通过的item_key'
+python -m api.bulk_import.cli import 'C:\batches\legacy-834-review-001' --db 'C:\platform\platform.db'
+```
+
+`stage-legacy-enrichment` 校验来源 JSONL 摘要和原始 PDF SHA-256，复制原 PDF 与标准化 JSONL，所有进度均从 `PENDING` 开始。`validate` 的 `READY` 仅表示机器结构检查通过，**不是人工核验**；不要批量自动确认。正式导入仍只创建 DRAFT，重复执行不会覆盖已有 Question。使用真实库前先备份数据库与题目资源。
+
 ## 批次格式与字段映射
 
 `manifest.json` 记录 PDF 文件名、SHA-256、页数、页错误、题数；`questions.jsonl` 使用 [单题 JSON Schema](../api/bulk_import/schema_v01.json)，每题包含 `schema_version: "0.1"`；`assets/` 保存原 PDF 副本和页面裁图；`progress.json` 保存单题状态、尝试数、人工确认摘要和入库 ID。四部分作为一个批次整体备份、传递或导出，不要只传 JSONL 后丢失资源。重新导入时用同一批次运行 `validate` → `confirm` → `import`，可被其他系统按同一 Schema 消费。不要手工修改 `item_key` 或原文件哈希来规避幂等保护。
@@ -117,6 +129,6 @@ python -m api.bulk_import.cli model-smoke --provider deepseek --allow-model-call
 
 ## 当前展示与验收限制
 
-现有用户端和管理员端将题干/答案当普通文本显示，未集成 LaTeX 渲染器；本轮只保证 `stem_latex` 数据保存，不保证公式可视化显示。管理员题目中心可查询、编辑 DRAFT，但现有编辑表单不展示独立 AI 答案或 `import_meta_json`。现有审核端点要求 `answer` 和 `analysis` 非空，因此**无来源答案的导入题目前不能审核发布**；不得把 AI 答案复制进来源答案字段以绕过该限制。后续由产品确认展示和审核规则，再由管理员端负责人处理界面。
+用户端仍把题干/答案当普通文本显示，未集成 LaTeX 渲染器；本轮只保证 `stem_latex` 数据保存，不保证公式可视化显示。管理员题目编辑区将来源答案与独立 AI 答案分区展示；AI 答案只读，题干或考试标签改变时标为过期。公开题目接口不返回 AI 原始 JSON 或导入内部元数据。现有审核端点仍要求来源 `answer` 和 `analysis` 非空，因此**无来源答案的导入题目前不能审核发布**；不得把 AI 答案复制进来源答案字段以绕过该限制。真题可以没有网页 URL，但发布前须人工核验，并保留可校验的原始 PDF、SHA-256 和页码。
 
 真实 10–20 题试点尚需 PO 指定 PDF 路径，并确认样本外发与模型费用。试点应人工标注普通文本、复杂公式、经济学图形、多小问、跨页、有/无来源答案；逐题记录文字、公式、拆题、图表、答案、标签准确率，单题模型 tokens/费用与处理时间。当前单元测试只覆盖合成 PDF 与 Mock/隔离 SQLite，不代表真实样本通过。
