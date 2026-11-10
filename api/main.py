@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from api.recognition import configured_provider
+from api.migrations.bulk_import_v01 import migrate as migrate_bulk_import_v01
 
 DB_PATH = Path(os.environ.get("ECON_DB_PATH", Path(__file__).resolve().parents[1] / "data" / "platform.db"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -68,6 +69,7 @@ with db() as con:
     }.items():
         if column not in question_columns:
             con.execute(f"ALTER TABLE questions ADD COLUMN {column} {definition}")
+    migrate_bulk_import_v01(con)
     intake_columns = {row["name"] for row in con.execute("PRAGMA table_info(question_intakes)")}
     if "recognition_json" not in intake_columns:
         con.execute("ALTER TABLE question_intakes ADD COLUMN recognition_json TEXT")
@@ -309,7 +311,9 @@ def questions(target_id: str | None = None):
     params = (target_id,) if target_id else ()
     if target_id:
         clause += " AND q.target_id=?"
-    return rows(f"""SELECT q.* FROM questions q JOIN topics t ON t.id=q.topic_id
+    return rows(f"""SELECT q.id,q.catalog_number,q.target_id,q.topic_id,q.source_type,q.source_name,
+        q.exam_year,q.question_type,q.difficulty,q.stem,q.answer,q.analysis
+        FROM questions q JOIN topics t ON t.id=q.topic_id
         JOIN topic_target_tags x ON x.topic_id=q.topic_id AND x.target_id=q.target_id
         {clause} ORDER BY q.catalog_number""", params)
 
@@ -409,8 +413,9 @@ class QuestionIn(BaseModel):
     question_type: str
     difficulty: int = Field(ge=1, le=5)
     stem: str = Field(min_length=5)
-    answer: str = Field(min_length=1)
-    analysis: str = Field(min_length=1)
+    # Incomplete source answers are permitted in DRAFT only; approval still checks both.
+    answer: str = ""
+    analysis: str = ""
     intake_id: str | None = None
 
 
@@ -423,8 +428,8 @@ def validated_question(payload: QuestionIn) -> dict:
         data[key] = data[key].strip()
     if data["source_type"] not in SOURCE_TYPES:
         raise HTTPException(422, "无效的题目来源类型")
-    if data["source_type"] in {"TARGET_PAST_EXAM", "RELATED_PAST_EXAM"} and (not data["exam_year"] or not data["source_url"]):
-        raise HTTPException(422, "真题必须填写年份与可核验来源链接")
+    if data["source_type"] in {"TARGET_PAST_EXAM", "RELATED_PAST_EXAM"} and not data["exam_year"]:
+        raise HTTPException(422, "真题必须填写考试年份")
     if data["source_url"]:
         parsed = urlparse(data["source_url"])
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -464,15 +469,29 @@ def update_question(question_id: str, payload: QuestionIn):
         raise HTTPException(422, "题目 ID 不可修改")
     try:
         with db() as con:
-            current = con.execute("SELECT catalog_number FROM questions WHERE id=?", (question_id,)).fetchone()
+            current = con.execute("SELECT catalog_number,answer,analysis,stem,target_id,ai_answer_json FROM questions WHERE id=?", (question_id,)).fetchone()
             if not current:
                 raise HTTPException(404, "题目不存在")
             data["catalog_number"] = data["catalog_number"] or current["catalog_number"]
+            answer_changed = data["answer"] != current["answer"] or data["analysis"] != current["analysis"]
+            ai_answer_json = current["ai_answer_json"]
+            if ai_answer_json and (data["stem"] != current["stem"] or data["target_id"] != current["target_id"]):
+                try:
+                    ai_answer = json.loads(ai_answer_json)
+                    if isinstance(ai_answer, dict):
+                        ai_answer["status"] = "STALE"
+                        ai_answer["stale_reason"] = "题干或考试标签已修改，需重新核对 AI 答案"
+                        ai_answer_json = json.dumps(ai_answer, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    ai_answer_json = None
             con.execute("""UPDATE questions SET catalog_number=:catalog_number,target_id=:target_id,topic_id=:topic_id,
                 source_type=:source_type,source_name=:source_name,source_url=:source_url,source_verified=:source_verified,
                 exam_year=:exam_year,question_type=:question_type,difficulty=:difficulty,stem=:stem,answer=:answer,
-                analysis=:analysis,intake_id=:intake_id,review_status='DRAFT',reviewed_at=NULL,review_note='',updated_at=:updated_at
-                WHERE id=:id""", {**data, "updated_at": datetime.now(timezone.utc).isoformat()})
+                analysis=:analysis,intake_id=:intake_id,ai_answer_json=:ai_answer_json,
+                source_answer_kind=CASE WHEN :answer_changed THEN 'UNKNOWN' ELSE source_answer_kind END,
+                review_status='DRAFT',reviewed_at=NULL,review_note='',updated_at=:updated_at
+                WHERE id=:id""", {**data, "answer_changed": answer_changed, "ai_answer_json": ai_answer_json,
+                                  "updated_at": datetime.now(timezone.utc).isoformat()})
             if data["intake_id"]:
                 con.execute("UPDATE question_intakes SET status='DRAFT_LINKED' WHERE id=?", (data["intake_id"],))
             bump(con, "content")
@@ -484,6 +503,29 @@ def update_question(question_id: str, payload: QuestionIn):
 class ReviewIn(BaseModel):
     decision: str
     note: str = Field(default="", max_length=1000)
+
+
+def has_verified_import_pdf(question: sqlite3.Row) -> bool:
+    """A missing URL is acceptable only with the preserved, hash-matched source PDF."""
+    try:
+        meta = json.loads(question["import_meta_json"] or "{}")
+        sha = meta.get("file_sha256", "")
+        pages = meta.get("pages", [])
+        if (not isinstance(sha, str) or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha)
+                or meta.get("source_storage_path") != f"question-sources/{sha}.pdf"
+                or not isinstance(pages, list) or not pages
+                or any(type(page) is not int or page < 1 for page in pages)):
+            return False
+        path = DB_PATH.parent / "question-sources" / f"{sha}.pdf"
+        if not path.is_file():
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == sha
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 @app.post("/api/admin/questions/{question_id}/review")
@@ -498,8 +540,11 @@ def review_question(question_id: str, payload: ReviewIn):
             required = ("catalog_number", "source_name", "topic_id", "target_id", "question_type", "stem", "answer", "analysis")
             if any(not question[key] for key in required):
                 raise HTTPException(422, "题目来源、标签、编号、答案和解析需完整填写")
-            if question["source_type"] in {"TARGET_PAST_EXAM", "RELATED_PAST_EXAM"} and (not question["source_verified"] or not question["exam_year"] or not question["source_url"]):
-                raise HTTPException(422, "真题来源须人工核验并填写年份后才能发布")
+            if question["source_type"] in {"TARGET_PAST_EXAM", "RELATED_PAST_EXAM"}:
+                if not question["source_verified"] or not question["exam_year"]:
+                    raise HTTPException(422, "真题来源须人工核验并填写年份后才能发布")
+                if not question["source_url"] and not has_verified_import_pdf(question):
+                    raise HTTPException(422, "真题无来源链接时，须保留可校验的原始 PDF、哈希和页码")
             if question["intake_id"] and not question["source_verified"]:
                 raise HTTPException(422, "识图录题需人工核对来源后才能发布")
             topic = con.execute("SELECT review_status FROM topics WHERE id=?", (question["topic_id"],)).fetchone()

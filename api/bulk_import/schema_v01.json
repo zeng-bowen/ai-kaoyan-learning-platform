@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/zeng-bowen/ai-kaoyan-learning-platform/blob/main/api/bulk_import/schema_v01.json",
+  "title": "Bulk question import item V0.1",
+  "type": "object",
+  "required": ["schema_version", "item_key", "source", "exam_scope", "content", "source_answer", "ai_answer", "classification", "validation", "processing_meta"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "item_key": {"type": "string", "minLength": 1},
+    "source": {
+      "type": "object",
+      "required": ["kind", "name", "file_name", "file_sha256", "pages", "is_demo"],
+      "properties": {
+        "kind": {"enum": ["TARGET_PAST_EXAM", "RELATED_PAST_EXAM", "CURATED_EXERCISE", "AI_GENERATED"]},
+        "name": {"type": "string", "minLength": 1},
+        "url": {"type": ["string", "null"]},
+        "file_name": {"type": "string", "minLength": 1},
+        "file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "pages": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1},
+        "exam_year": {"type": ["integer", "null"]},
+        "is_demo": {"type": "boolean"},
+        "human_verified": {"type": "boolean"}
+      }
+    },
+    "exam_scope": {"type": "object", "required": ["target_id"], "properties": {"target_id": {"type": ["string", "null"]}}},
+    "content": {
+      "type": "object", "required": ["stem_raw", "stem_latex", "subquestions", "latex_fragments", "assets"],
+      "properties": {
+        "stem_raw": {"type": "string"}, "stem_latex": {"type": "string"},
+        "subquestions": {"type": "array", "items": {"type": "object", "required": ["label", "text"], "properties": {"label": {"type": "string"}, "text": {"type": "string"}}}},
+        "latex_fragments": {"type": "array", "items": {"type": "string"}},
+        "assets": {"type": "array", "items": {"type": "object", "required": ["path", "sha256", "page", "bbox"], "properties": {"path": {"type": "string", "pattern": "^assets/"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "page": {"type": "integer", "minimum": 1}, "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}}}}
+      }
+    },
+    "source_answer": {"type": "object", "required": ["status", "kind", "text", "analysis", "human_verified", "evidence"], "properties": {
+      "status": {"enum": ["ABSENT", "PRESENT"]}, "kind": {"enum": ["NONE", "REFERENCE", "OFFICIAL", "UNKNOWN"]},
+      "text": {"type": "string"}, "analysis": {"type": "string"}, "human_verified": {"type": "boolean"},
+      "evidence": {"type": "array", "items": {"type": "object", "required": ["file_sha256", "page", "note"], "properties": {"file_sha256": {"type": "string"}, "page": {"type": "integer", "minimum": 1}, "note": {"type": "string"}}}}
+    }},
+    "ai_answer": {"type": "object", "required": ["status", "answer", "analysis", "provider"], "properties": {
+      "status": {"enum": ["PENDING", "SUCCEEDED", "MOCK"]}, "answer": {"type": "string"}, "analysis": {"type": "string"}, "provider": {"type": ["string", "null"]}, "error": {"type": "string"}
+    }},
+    "classification": {"type": "object", "required": ["topic_id", "question_type", "difficulty"], "properties": {
+      "topic_id": {"type": ["string", "null"]}, "question_type": {"type": ["string", "null"]}, "difficulty": {"type": ["integer", "null"], "minimum": 1, "maximum": 5}
+    }},
+    "validation": {"type": "object", "required": ["errors", "warnings", "duplicate_candidates"], "properties": {
+      "errors": {"type": "array", "items": {"type": "string"}}, "warnings": {"type": "array", "items": {"type": "string"}}, "duplicate_candidates": {"type": "array", "items": {"type": "string"}}
+    }},
+    "processing_meta": {"type": "object", "required": ["pipeline_version", "method", "regions", "model_runs"], "properties": {
+      "pipeline_version": {"type": "string"}, "method": {"type": "string"},
+      "regions": {"type": "array", "items": {"type": "object"}}, "model_runs": {"type": "array", "items": {"type": "object"}}
+    }}
+  }
+}

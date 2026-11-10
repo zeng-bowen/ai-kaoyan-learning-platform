@@ -6,7 +6,7 @@ import './admin.css';
 type Target = { id: string; school: string; exam_label: string; note: string; target_year: number };
 type TargetDraft = Pick<Target, 'school' | 'exam_label' | 'note'>;
 type Topic = { id: string; subject: string; module: string; name: string; summary: string; source_name: string; source_url: string; review_status: string; target_ids: string[] };
-type Question = QuestionDraft & { review_status: string; reviewed_at: string | null; review_note: string };
+type Question = QuestionDraft & { review_status: string; reviewed_at: string | null; review_note: string; source_answer_kind?: string; ai_answer_json?: string | null; import_meta_json?: string | null };
 type QuestionDraft = { id: string; catalog_number: string; target_id: string; topic_id: string; source_type: string; source_name: string; source_url: string; source_verified: boolean; exam_year: number | null; question_type: string; difficulty: number; stem: string; answer: string; analysis: string; intake_id: string | null };
 type Intake = { id: string; original_name: string; status: string; created_at: string };
 type Metrics = { active_training_sessions: number; attempt_count: number; published_questions: number; correct_rate: number | null; difficulty_stats: { difficulty: number; attempts: number; average_self_rating: number }[]; method: string };
@@ -23,6 +23,14 @@ const emptyTarget = (): TargetDraft => ({ school: '', exam_label: '', note: '' }
 const emptyTopic = (): Topic => ({ id: '', subject: '', module: '', name: '', summary: '', source_name: '', source_url: '', review_status: 'DRAFT', target_ids: [] });
 const emptyQuestion = (): QuestionDraft => ({ id: '', catalog_number: '', target_id: '', topic_id: '', source_type: 'CURATED_EXERCISE', source_name: '', source_url: '', source_verified: false, exam_year: null, question_type: '简答题', difficulty: 2, stem: '', answer: '', analysis: '', intake_id: null });
 const SOURCE_LABELS: Record<string, string> = { TARGET_PAST_EXAM: '目标院校真题', RELATED_PAST_EXAM: '兄弟院校真题', CURATED_EXERCISE: '精品练习', AI_GENERATED: 'AI 草稿' };
+const ANSWER_KIND_LABELS: Record<string, string> = { OFFICIAL: '官方答案（已核验证据）', REFERENCE: '来源参考答案', NONE: '无来源答案', UNKNOWN: '答案性质待核对' };
+type AiAnswer = { status?: string; answer?: string; analysis?: string; provider?: string; model?: string; stale_reason?: string };
+type ImportMeta = { file_name?: string; pages?: number[]; duplicate_warnings?: string[] };
+function parseJsonObject<T extends object>(raw?: string | null): T | null {
+  if (!raw) return null;
+  try { const value: unknown = JSON.parse(raw); return value && typeof value === 'object' && !Array.isArray(value) ? value as T : null; }
+  catch { return null; }
+}
 
 function App() {
   const [section, setSection] = useState<Section>('总览');
@@ -89,7 +97,15 @@ function App() {
   }
   function selectTarget(item: Target) { setTargetDraft({ school: item.school, exam_label: item.exam_label, note: item.note }); setEditingTargetId(item.id); setSection('院校与考试'); }
   function selectTopic(item: Topic) { setTopicDraft({ ...item, target_ids: [...item.target_ids] }); setEditingTopic(true); setSection('知识目录'); }
-  function selectQuestion(item: Question) { const { review_status: _status, reviewed_at: _reviewed, review_note: _note, ...draft } = item; setQuestionDraft(draft); setEditingQuestion(true); setSection('题目中心'); }
+  function selectQuestion(item: Question) {
+    setQuestionDraft({ id: item.id, catalog_number: item.catalog_number, target_id: item.target_id,
+      topic_id: item.topic_id, source_type: item.source_type, source_name: item.source_name,
+      source_url: item.source_url, source_verified: item.source_verified, exam_year: item.exam_year,
+      question_type: item.question_type, difficulty: item.difficulty, stem: item.stem,
+      answer: item.answer, analysis: item.analysis, intake_id: item.intake_id });
+    setEditingQuestion(true); setSection('题目中心');
+    window.requestAnimationFrame(() => document.getElementById('question-editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }
   function newQuestion(intakeId: string | null = null) { setQuestionDraft({ ...emptyQuestion(), target_id: targets[0]?.id || '', topic_id: topics.find(item => item.target_ids.includes(targets[0]?.id || ''))?.id || '', intake_id: intakeId }); setEditingQuestion(false); setSection('题目中心'); }
   async function saveTarget() {
     const method = editingTargetId ? 'PUT' : 'POST';
@@ -264,6 +280,9 @@ function App() {
   function questionSection() {
     if (section !== '题目中心') return null;
     const topicOptions = topics.filter(item => item.target_ids.includes(questionDraft.target_id));
+    const storedQuestion = editingQuestion ? questions.find(item => item.id === questionDraft.id) : null;
+    const aiAnswer = parseJsonObject<AiAnswer>(storedQuestion?.ai_answer_json);
+    const importMeta = parseJsonObject<ImportMeta>(storedQuestion?.import_meta_json);
     return <section>
       <div className="admin-heading"><div><h1>题目中心</h1><p>试卷与题目资料统一在此上传、录入、筛选和审核；题目按院校＋考试科目代码标签匹配。</p></div><button className="primary" onClick={() => newQuestion()}>新增题目</button></div>
       <div className="admin-panel"><div className="admin-filters">
@@ -273,7 +292,7 @@ function App() {
         <label>栏目<select value={filters.source_type} onChange={event => setFilters({ ...filters, source_type: event.target.value })}><option value="">全部栏目</option>{Object.entries(SOURCE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <label>审核状态<select value={filters.review_status} onChange={event => setFilters({ ...filters, review_status: event.target.value })}><option value="">全部状态</option><option value="DRAFT">待审核</option><option value="APPROVED">已发布</option><option value="REJECTED">已退回</option></select></label>
         <label>编号 / 题干<input value={filters.search} onChange={event => setFilters({ ...filters, search: event.target.value })} placeholder="搜索题目" /></label>
-      </div><div className="admin-table-wrap"><table><thead><tr><th>管理编号</th><th>题目 / 来源</th><th>考试标签 / 真题年份</th><th>知识点</th><th>状态</th><th>操作</th></tr></thead><tbody>{matches.map(item => { const tag = targets.find(target => target.id === item.target_id); return <tr key={item.id}><td className="code-cell">{item.catalog_number}</td><td><strong>{item.stem}</strong><small>{SOURCE_LABELS[item.source_type]} · {item.source_name}</small></td><td>{tag ? `${tag.school} · ${tag.exam_label}` : item.target_id}{item.exam_year ? ` · ${item.exam_year}` : ''}</td><td>{topics.find(topic => topic.id === item.topic_id)?.name || item.topic_id}</td><td><span className={`review-state ${item.review_status.toLowerCase()}`}>{item.review_status === 'APPROVED' ? '已发布' : item.review_status === 'REJECTED' ? '已退回' : '待审核'}</span></td><td><div className="admin-actions"><button onClick={() => selectQuestion(item)}>编辑</button>{item.review_status !== 'APPROVED' && <button onClick={() => void review(item, 'APPROVED')}>审核发布</button>}{item.review_status === 'DRAFT' && <button onClick={() => void review(item, 'REJECTED')}>退回</button>}</div></td></tr>; })}</tbody></table>{!matches.length && <p className="admin-empty">当前筛选条件下没有题目。</p>}</div></div>
+      </div><div className="admin-table-wrap"><table><thead><tr><th>管理编号</th><th>题目 / 来源</th><th>考试标签 / 真题年份</th><th>知识点</th><th>状态</th><th>操作</th></tr></thead><tbody>{matches.map(item => { const tag = targets.find(target => target.id === item.target_id); return <tr key={item.id}><td className="code-cell">{item.catalog_number}</td><td><strong>{item.stem}</strong><small>{SOURCE_LABELS[item.source_type]} · {item.source_name}</small></td><td>{tag ? `${tag.school} · ${tag.exam_label}` : item.target_id}{item.exam_year ? ` · ${item.exam_year}` : ''}</td><td>{topics.find(topic => topic.id === item.topic_id)?.name || item.topic_id}</td><td><span className={`review-state ${item.review_status.toLowerCase()}`}>{item.review_status === 'APPROVED' ? '已发布' : item.review_status === 'REJECTED' ? '已退回' : '待审核'}</span></td><td><div className="admin-actions"><button onClick={() => selectQuestion(item)}>查看／编辑</button>{item.review_status !== 'APPROVED' && <button onClick={() => void review(item, 'APPROVED')}>审核发布</button>}{item.review_status === 'DRAFT' && <button onClick={() => void review(item, 'REJECTED')}>退回</button>}</div></td></tr>; })}</tbody></table>{!matches.length && <p className="admin-empty">当前筛选条件下没有题目。</p>}</div></div>
       <div className="admin-panel" id="question-editor"><h2>{editingQuestion ? `编辑题目 · ${questionDraft.catalog_number}` : '录入新题目'}</h2><p>管理编号可自定义，留空自动分配。选择考试标签后，只能关联适用该标签的知识点。</p>
         <div className="form-grid">
           <label>题目 ID<input disabled={editingQuestion} value={questionDraft.id} placeholder="留空自动生成" onChange={event => setQuestionDraft({ ...questionDraft, id: event.target.value })} /></label>
@@ -285,14 +304,25 @@ function App() {
           <label>难度（1–5）<input type="number" min="1" max="5" value={questionDraft.difficulty} onChange={event => setQuestionDraft({ ...questionDraft, difficulty: Number(event.target.value) })} /></label>
           <label>真题年份<input type="number" min="1990" max="2100" value={questionDraft.exam_year ?? ''} onChange={event => setQuestionDraft({ ...questionDraft, exam_year: event.target.value ? Number(event.target.value) : null })} /></label>
           <label>来源名称<input value={questionDraft.source_name} onChange={event => setQuestionDraft({ ...questionDraft, source_name: event.target.value })} placeholder="如平台原创、试卷名称" /></label>
-          <label>来源链接（HTTPS）<input type="url" value={questionDraft.source_url} onChange={event => setQuestionDraft({ ...questionDraft, source_url: event.target.value })} /></label>
+          <label>来源链接（如有，须为 HTTPS）<input type="url" value={questionDraft.source_url} onChange={event => setQuestionDraft({ ...questionDraft, source_url: event.target.value })} /></label>
           <label>关联截图<select value={questionDraft.intake_id || ''} onChange={event => setQuestionDraft({ ...questionDraft, intake_id: event.target.value || null })}><option value="">无截图</option>{intakes.map(item => <option key={item.id} value={item.id}>{item.original_name}</option>)}</select></label>
           <label className="check-label"><input type="checkbox" checked={questionDraft.source_verified} onChange={event => setQuestionDraft({ ...questionDraft, source_verified: event.target.checked })} />已人工核对来源与图片</label>
         </div>
         <label>题干<textarea rows={4} value={questionDraft.stem} onChange={event => setQuestionDraft({ ...questionDraft, stem: event.target.value })} /></label>
-        <label>参考答案<textarea rows={4} value={questionDraft.answer} onChange={event => setQuestionDraft({ ...questionDraft, answer: event.target.value })} /></label>
-        <label>解析<textarea rows={4} value={questionDraft.analysis} onChange={event => setQuestionDraft({ ...questionDraft, analysis: event.target.value })} /></label>
-        <div className="admin-actions"><button className="primary" disabled={busy || !questionDraft.target_id || !topicOptions.some(item => item.id === questionDraft.topic_id) || !questionDraft.source_name || !questionDraft.stem || !questionDraft.answer || !questionDraft.analysis} onClick={() => void saveQuestion()}>{editingQuestion ? '保存修改并重新审核' : '保存为待审核草稿'}</button>{editingQuestion && <button onClick={() => newQuestion()}>取消编辑</button>}</div>
+        <div className="answer-separation"><h3>来源答案 · {ANSWER_KIND_LABELS[storedQuestion?.source_answer_kind || 'UNKNOWN'] || '答案性质待核对'}</h3><p>下方只保存原资料中的答案及解析；没有来源答案时保持为空。AI 答案不会写入这里。</p></div>
+        <label>来源／参考答案<textarea rows={4} value={questionDraft.answer} onChange={event => setQuestionDraft({ ...questionDraft, answer: event.target.value })} /></label>
+        <label>来源解析<textarea rows={4} value={questionDraft.analysis} onChange={event => setQuestionDraft({ ...questionDraft, analysis: event.target.value })} /></label>
+        {storedQuestion && <div className="answer-separation" aria-label="独立 AI 答案">
+          <h3>独立 AI 答案 · {aiAnswer?.status === 'SUCCEEDED' ? '已生成，待人工核对' : aiAnswer?.status === 'STALE' ? '题干已修改，需重新核对' : '待生成／不可用'}</h3>
+          {aiAnswer?.status === 'STALE' && <p role="status">{aiAnswer.stale_reason || '题干或考试标签已改变，原 AI 答案不可直接沿用。'}</p>}
+          {aiAnswer?.answer && <div><strong>答案</strong><p className="answer-text">{aiAnswer.answer}</p></div>}
+          {aiAnswer?.analysis && <div><strong>解析</strong><p className="answer-text">{aiAnswer.analysis}</p></div>}
+          {!aiAnswer?.answer && <p>尚无可查看的独立 AI 答案。请勿用来源答案代替。</p>}
+          {(aiAnswer?.provider || aiAnswer?.model) && <p>模型记录：{aiAnswer.provider || '未知'}{aiAnswer.model ? ` · ${aiAnswer.model}` : ''}</p>}
+          {importMeta && <p>原始资料：{importMeta.file_name || '未记录'}{importMeta.pages?.length ? ` · 第 ${importMeta.pages.join('、')} 页` : ' · 页码待核对'}</p>}
+          {importMeta?.duplicate_warnings?.map((warning, index) => <p key={index} role="status">{warning}</p>)}
+        </div>}
+        <div className="admin-actions"><button className="primary" disabled={busy || !questionDraft.target_id || !topicOptions.some(item => item.id === questionDraft.topic_id) || !questionDraft.source_name || !questionDraft.stem} onClick={() => void saveQuestion()}>{editingQuestion ? '保存修改并重新审核' : '保存为待审核草稿'}</button>{editingQuestion && <button onClick={() => newQuestion()}>取消编辑</button>}</div>
       </div>
       <div className="admin-panel" id="question-intakes"><h2>题目资料上传 · {intakes.length} 张图片</h2><p>支持批量上传 PNG、JPEG、WebP 截图，每张不超过 8 MB。图片仅进入管理员队列，不会自动发布到用户端。</p><label className="upload-control">选择图片<input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={busy} onChange={event => { void upload(event.target.files); event.target.value = ''; }} /></label><p className="data-note">AI 识别需逐张点击触发，结果只作为人工核对建议；未配置或失败时仍可「查看原图」和「人工录题」。</p><div className="admin-list">{intakes.map(item => { const state = recognition[item.id]; const loading = state?.status === 'loading'; return <div className="intake-item" key={item.id}><div className="intake-head"><div><strong>{item.original_name}</strong><small>{new Date(item.created_at).toLocaleString('zh-CN')} · {item.status}</small></div><div className="admin-actions"><button onClick={() => void showImage(item)}>查看原图</button><button onClick={() => newQuestion(item.id)}>人工录题</button><button className="recognize-trigger" disabled={loading} aria-busy={loading} onClick={() => void recognizeIntake(item)}>{loading ? '识别中…' : state?.status === 'success' ? '重新识别' : 'AI 识别'}</button></div></div>{state && state.status !== 'idle' && renderRecognition(item, state)}</div>; })}{!intakes.length && <p className="admin-empty">上传截图后会在这里逐张列出。</p>}</div></div>
       {imageUrl && <div className="admin-image-preview"><div><strong>{imageName}</strong><button onClick={() => { URL.revokeObjectURL(imageUrl); setImageUrl(null); }}>关闭</button></div><img src={imageUrl} alt={`上传题目截图：${imageName}`} /></div>}
